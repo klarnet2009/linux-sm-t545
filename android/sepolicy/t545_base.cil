@@ -1,0 +1,61 @@
+; SM-T545 mainline: types and domains for what lives outside the stock partitions (/cache/t545, the tmpfs overlay of
+; /system/etc/init). Appended to system_ext_sepolicy.cil; file labels in t545_file_contexts.
+
+; --- files ---
+(type t545_cache_file)
+(roletype object_r t545_cache_file)
+(typeattributeset file_type (t545_cache_file))
+
+; kernel modules outside /vendor (t545-icp, Venus)
+(type t545_module_file)
+(roletype object_r t545_module_file)
+(typeattributeset file_type (t545_module_file))
+
+; --- daemons that used to run in the init domain ---
+(type t545_keymint)
+(type t545_keymint_exec)
+(type t545_hexrpcd)
+(type t545_hexrpcd_exec)
+(type t545_qrtr)
+(type t545_qrtr_exec)
+(roletype r t545_keymint)
+(roletype r t545_hexrpcd)
+(roletype r t545_qrtr)
+(roletype object_r t545_keymint_exec)
+(roletype object_r t545_hexrpcd_exec)
+(roletype object_r t545_qrtr_exec)
+(typeattributeset domain (t545_keymint t545_hexrpcd t545_qrtr))
+(typeattributeset file_type (t545_keymint_exec t545_hexrpcd_exec t545_qrtr_exec))
+(typeattributeset exec_type (t545_keymint_exec t545_hexrpcd_exec t545_qrtr_exec))
+(typeattributeset system_file_type (t545_keymint_exec t545_hexrpcd_exec t545_qrtr_exec))
+
+; software KeyMint: the KeyMint server of the platform policy (SecureClock, SharedSecret and RKP have no attributes here,
+; their services are allowed explicitly)
+(typeattributeset hal_keymint (t545_keymint))
+(typeattributeset hal_keymint_server (t545_keymint))
+
+; init_daemon_domain() for the three
+(macro t545_daemon ((type d) (type e))
+	(typetransition init e process d)
+	(allow init e (file (read getattr map execute open)))
+	(allow init d (process (transition siginh rlimitinh noatsecure)))
+	(allow d e (file (entrypoint read getattr map execute open)))
+	(allow d init (process (sigchld)))
+	(allow d init (fd (use)))
+)
+(call t545_daemon (t545_keymint t545_keymint_exec))
+(call t545_daemon (t545_hexrpcd t545_hexrpcd_exec))
+(call t545_daemon (t545_qrtr t545_qrtr_exec))
+
+; (enforcing since LKM907: their rules come from the LKM906 boot, t545_rules2.cil)
+
+; rmtfs shared memory of the modem (/dev/qcom_rmtfs_mem1), only for rmtfs (t545_qrtr)
+(type t545_rmtfs_device)
+(roletype object_r t545_rmtfs_device)
+(typeattributeset dev_type (t545_rmtfs_device))
+(allow t545_qrtr t545_rmtfs_device (chr_file (getattr open read write ioctl map)))
+
+; /dev/mem (no kmem_device type in this policy): only postboot's boot-counter reset uses it
+(type t545_mem_device)
+(roletype object_r t545_mem_device)
+(typeattributeset dev_type (t545_mem_device))

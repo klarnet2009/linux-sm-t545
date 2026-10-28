@@ -1,0 +1,8 @@
+<!-- SM-T545 AIDL vibrator HAL (km/t545-vibrator-service, source in vibhal/); the Android 16 framework only talks to the AIDL IVibrator -->
+<manifest version="1.0" type="device">
+    <hal format="aidl">
+        <name>android.hardware.vibrator</name>
+        <version>3</version>
+        <fqname>IVibrator/default</fqname>
+    </hal>
+</manifest>

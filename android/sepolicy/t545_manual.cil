@@ -1,0 +1,100 @@
+; SM-T545 mainline: hand-written rules (the generated ones are in t545_rules.cil)
+
+; Mesa freedreno and minigbm talk DRM (0x64xx, the msm driver's own ioctls from 0x6440) to the render node; the platform
+; policy only lists the kgsl ioctls of the stock Adreno driver for gpu_device, so every app's RenderThread aborted.
+(allowx domain gpu_device (ioctl chr_file ((range 0x6400 0x64ff))))
+; the display (primary) node: only the composer and SurfaceFlinger
+(allowx hal_graphics_composer_default graphics_device (ioctl chr_file ((range 0x6400 0x64ff))))
+(allowx surfaceflinger graphics_device (ioctl chr_file ((range 0x6400 0x64ff))))
+
+; /vendor/lib64, /vendor/lib, /system/product/etc and /system/product/overlay are overlayfs mounts made by our boot
+; scripts (sec_system_init_shell); overlayfs opens the lower files with the mounter's credentials, so every process that
+; maps a library from them uses an fd of that domain.
+(allow domain sec_system_init_shell (fd (use)))
+
+; codec message queues (FMQ) are memfds of services without a tmpfs type_transition: plain tmpfs, handed over by binder
+(allow appdomain tmpfs (file (read write getattr map)))
+
+; tinymix in our scripts (headphone switch, routes at boot)
+(allowx sec_system_init_shell audio_device (ioctl chr_file ((range 0x5500 0x55ff))))
+
+; ashmem is memfd here (sys.use_memfd, no ashmem driver on mainline): shared memory of services (AudioTrack buffers of
+; audioserver, codec message queues of mediaswcodec and the camera HAL) is a memfd at level s0 that apps (s0:cN,..) must
+; write; the MLS write constraint only lets them do that on an mlstrustedobject type. TE rules still decide who may.
+(typeattributeset mlstrustedobject (tmpfs audioserver_tmpfs cameraserver_tmpfs mediaserver_tmpfs mediaextractor_tmpfs appdomain_tmpfs))
+(allow appdomain audioserver_tmpfs (file (read write getattr map)))
+; the camera HAL's message queues (its memfds are plain tmpfs)
+(allow cameraserver tmpfs (file (read write getattr map)))
+
+; libcamera drives the CAMSS media controller (MEDIA_IOC_*: 0x7cxx), the V4L2 video and subdev nodes (0x56xx) and the
+; hardware ISP (/dev/cvp-t545-isp, labelled video_device: 0x49xx); video_device has an ioctl allowlist in the platform
+(allowx hal_camera_default video_device (ioctl chr_file ((range 0x4900 0x49ff) (range 0x5600 0x56ff) (range 0x7c00 0x7cff))))
+
+; Mesa (drmGetDevice) reads the uevent of the render node's device to find the driver: on mainline that is the DPU
+; display controller, plain "sysfs" here, which apps may not read (dontaudit: every app started its GPU and aborted).
+(genfscon sysfs "/devices/platform/soc@0/ae00000.display-subsystem/ae01000.display-controller/uevent" (u object_r sysfs_gpu ((s0) (s0))))
+
+; the Venus encoder (our Codec2 V4L2 service in mediacodec) allocates its input buffers from the system DMA heap
+(allow mediacodec dmabuf_system_heap_device (chr_file (getattr open read ioctl)))
+(allowx mediacodec dmabuf_system_heap_device (ioctl chr_file (0x4800)))
+(allow mediacodec graphics_config_writable_prop (file (getattr open read map)))
+; tombstones of processes that map libraries from /cache/t545
+(allow crash_dump t545_cache_file (dir (getattr search)))
+
+; relabelling at boot: init (restorecon_recursive of the tmpfs overlays of /system/etc and of /cache/t545) and our scripts
+; (/dev/t545fw firmware copies and links, /dev/t545povl overlay apks, both created in /dev before the overlay mounts)
+(allow init tmpfs (dir (relabelfrom getattr search read open)))
+(allow init tmpfs (file (relabelfrom getattr)))
+(allow init system_file (file (relabelto)))
+(allow init t545_keymint_exec (file (relabelto)))
+(allow init t545_hexrpcd_exec (file (relabelto)))
+(allow init t545_qrtr_exec (file (relabelto)))
+(allow init hal_bluetooth_default_exec (file (relabelto)))
+(allow init hal_vibrator_default_exec (file (relabelto)))
+(allow init adb_keys_file (file (relabelto)))
+(allow init vendor_firmware_file (file (relabelto)))
+(allow init system_file (dir (relabelto)))
+(allow init cache_file (dir (relabelfrom)))
+(allow init t545_cache_file (dir (relabelfrom)))
+(allow init cache_file (file (relabelfrom)))
+(allow init t545_cache_file (file (relabelfrom)))
+(allow init t545_cache_file (dir (relabelto)))
+(allow init t545_module_file (dir (relabelto)))
+(allow init same_process_hal_file (dir (relabelto)))
+(allow init system_file (dir (relabelto)))
+(allow init vendor_configs_file (dir (relabelto)))
+(allow init t545_cache_file (file (relabelto)))
+(allow init t545_module_file (file (relabelto)))
+(allow init same_process_hal_file (file (relabelto)))
+(allow init system_file (file (relabelto)))
+(allow init vendor_configs_file (file (relabelto)))
+(allow init mediacodec_exec (file (relabelto)))
+(allow init hal_graphics_allocator_default_exec (file (relabelto)))
+(allow init hal_graphics_composer_default_exec (file (relabelto)))
+(allow init hal_gatekeeper_default_exec (file (relabelto)))
+(allow init hal_camera_default_exec (file (relabelto)))
+(allow sec_system_init_shell device (dir (relabelfrom)))
+(allow sec_system_init_shell device (file (relabelfrom)))
+(allow sec_system_init_shell device (lnk_file (relabelfrom)))
+(allow sec_system_init_shell system_file (dir (relabelto search getattr open read write add_name remove_name)))
+(allow sec_system_init_shell vendor_firmware_file (dir (relabelto search getattr open read write add_name remove_name)))
+(allow sec_system_init_shell system_file (file (relabelto getattr)))
+(allow sec_system_init_shell vendor_firmware_file (file (relabelto getattr)))
+(allow sec_system_init_shell vendor_firmware_file (lnk_file (relabelto create unlink getattr read)))
+(allow kernel vendor_firmware_file (lnk_file (read getattr)))
+(allow kernel vendor_firmware_file (dir (search getattr)))
+
+; the vendor file_contexts pin /dev/dri/renderD128 to graphics_device (exact path, wins over our regex): prep.sh relabels it
+(allow sec_system_init_shell graphics_device (chr_file (relabelfrom getattr)))
+(allow sec_system_init_shell gpu_device (chr_file (relabelto getattr)))
+; postboot resets the stage1 boot-loop counter through /dev/mem (devmem 0xa0f00004): without it the 4th boot goes to Download
+(allow sec_system_init_shell t545_mem_device (chr_file (getattr open read write map)))
+
+; our lights HAL (backlight only) runs in the stock hal_light_default domain
+(allow init hal_light_default_exec (file (relabelto)))
+
+; boot time: prep.sh links the 4.9 eMMC path (/dev/block/platform/soc) and puts a /dev/qseecom placeholder
+(allow sec_system_init_shell block_device (dir (create add_name write search)))
+(allow sec_system_init_shell block_device (lnk_file (create getattr)))
+; boot time: the trimmed copy of rw-system.sh in the /system/etc/init overlay (see t545_file_contexts)
+(allow init phhsu_exec (file (relabelto)))

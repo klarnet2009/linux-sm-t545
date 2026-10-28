@@ -1,0 +1,167 @@
+on early-init
+    # SELinux labels of the tmpfs overlays made by the initramfs (t545_file_contexts): our daemons get their domains from them
+    restorecon_recursive /system/etc/init
+    restorecon_recursive /system/etc/permissions
+    # first boot of a fresh RAM /data dexopts every app: only verify, 2 threads, so that the CPUs and the little RAM are left for the UI
+    setprop pm.dexopt.first-boot verify
+    setprop pm.dexopt.boot-after-ota verify
+    setprop pm.dexopt.boot-after-mainline-update verify
+    setprop pm.dexopt.install verify
+    setprop pm.dexopt.install-fast verify
+    setprop pm.dexopt.install-bulk verify
+    setprop pm.dexopt.bg-dexopt verify
+    setprop pm.dexopt.cmdline verify
+    setprop dalvik.vm.dex2oat-threads 2
+    setprop dalvik.vm.image-dex2oat-threads 2
+    # no modem on mainline yet (MPSS not booted, RIL stubbed): com.android.phone waited for the radio HAL on every start ("failed to
+    # complete startup" ANRs, which also froze Settings > Sound). Declare the tablet radio-less, like a Wi-Fi-only build.
+    setprop ro.radio.noril yes
+    # libcutils ashmem: use memfd (the kernel has no /dev/ashmem); needs the ASHMEM_GET_SIZE shim in mm/shmem.c
+    setprop sys.use_memfd true
+    # emulated storage like a current vendor (build/make/target/product/emulated_storage.mk): per-app project IDs for quota accounting
+    # and a casefolded /data/media (init.rc runs chattr +F). Both need the f2fs /data made by prep.sh (project_quota + casefold).
+    setprop external_storage.projid.enabled 1
+    setprop external_storage.casefold.enabled 1
+    exec - root root -- /system/bin/sh /system/etc/init/t545/prep.sh
+
+# pa_daemon_qsee.rc blocks init in late-fs with "wait_for_prop vendor.sys.qseecomd.enable true", which only qseecomd would set
+on init
+    setprop vendor.sys.qseecomd.enable true
+
+# No TrustZone on mainline: the Samsung/Qualcomm secure-world services only crash-loop (and flood the console ring). init parses /system/etc/init
+# before /vendor/etc/init and ignores a later duplicate definition, so these stubs take the vendor services' names. No "interface" lines:
+# hwservicemanager's ctl.interface_start finds nothing to start.
+service vendor.keymaster-4-0 /system/bin/true
+    disabled
+    oneshot
+service vendor.gatekeeper-1-0 /system/bin/true
+    disabled
+    oneshot
+service vendor.qseecomd /system/bin/true
+    disabled
+    oneshot
+service secure_storage /system/bin/true
+    disabled
+    oneshot
+service vaultkeeper /system/bin/true
+    disabled
+    oneshot
+service vaultkeeper_hal /system/bin/true
+    disabled
+    oneshot
+service qseecom-service /system/bin/true
+    disabled
+    oneshot
+service qteeconnector-hal-1-0 /system/bin/true
+    disabled
+    oneshot
+service authfwserv /system/bin/true
+    disabled
+    oneshot
+service drk_hal /system/bin/true
+    disabled
+    oneshot
+service vendor.ipacm /system/bin/true
+    disabled
+    oneshot
+service engmode_hal /system/bin/true
+    disabled
+    oneshot
+service proca /system/bin/true
+    disabled
+    oneshot
+service tui_comm-1-0 /system/bin/true
+    disabled
+    oneshot
+
+# software (insecure, in-process TA) KeyMint + SecureClock + SharedSecret, built from hardware/interfaces/security/keymint/aidl/default
+service t545_keymint /system/etc/init/t545/keymint-service
+    class early_hal
+    user system
+    group system
+
+# adb over USB (debugging): the fresh /data has no authorized host keys and there is no UI to confirm one, so install the host's public key.
+# sys.usb.controller is a600000.dwc3 (set by the vendor rc); the DT node is named dwc3@a600000 so that the UDC gets the same name.
+on post-fs-data
+    # FRP block (prep.sh frp): ueventd re-applies its default owner/mode to loop6 after the losetup "change" uevent, and PersistentDataBlockService
+    # (uid system) then fails with EACCES -> "init timeout" in boot phase 500 -> system_server crash loop. Set them again before zygote starts.
+    chown system system /dev/block/loop6
+    chmod 0660 /dev/block/loop6
+    mkdir /data/misc/adb 02750 system shell
+    copy /system/etc/init/t545/adb_keys /data/misc/adb/adb_keys
+    chown system shell /data/misc/adb/adb_keys
+    chmod 0640 /data/misc/adb/adb_keys
+    exec - root root -- /system/bin/sh /system/etc/init/t545/seccomp.sh
+
+on boot
+    # adbd starts as root straight away (debuggable build): restarting it for "adb root" needs the whole USB rebind again
+    # The gadget is set up by the stock configfs actions for "adb". (The former private value "t545" + t545-usb.sh broke system_server's
+    # UsbDeviceManager: Settings > USB crashed in getCurrentFunctions, and its switch to "adb" after boot fought usb.sh and lost the link.)
+    setprop persist.sys.root_access 3
+    setprop service.adb.root 1
+    setprop sys.usb.config adb
+
+on property:sys.usb.config=*
+    exec_background - root root -- /system/bin/sh /system/etc/init/t545/usblog.sh cfg ${sys.usb.config} ${sys.usb.state}
+
+on property:sys.usb.state=*
+    exec_background - root root -- /system/bin/sh /system/etc/init/t545/usblog.sh state ${sys.usb.config} ${sys.usb.state}
+
+# init.rc sets sys.use_memfd=false in post-fs-data ("until vendor is ready"); zygote-start runs later
+on zygote-start
+    setprop sys.use_memfd true
+
+# Enabling a SAMPLING perf event on the sched:sched_switch tracepoint (even "simpleperf record -c 100000", with or without a BPF program) hangs the whole
+# SoC on this kernel: instant hard reset, no log. system_server does exactly that through libtimeinstate (BatteryStats per-uid CPU time-in-state, perf
+# event + BPF program from /sys/fs/bpf) ~35 s after it starts. Without the pinned programs libtimeinstate reports "unsupported" and Android falls back.
+on boot
+    rm /sys/fs/bpf/prog_timeInState_tracepoint_sched_sched_switch
+    rm /sys/fs/bpf/prog_timeInState_tracepoint_sched_sched_process_free
+    rm /sys/fs/bpf/prog_timeInState_tracepoint_power_cpu_frequency
+
+# vibration motor (kernel t545-vibrator, timed_output class): the vendor vibrator HAL runs as system and writes the duration here
+on early-boot
+    chown system system /sys/class/timed_output/vibrator/enable
+    chmod 0664 /sys/class/timed_output/vibrator/enable
+
+# 3.5 mm jack: audio route speaker <-> headphones (km/t545-jack.sh)
+service t545_jack /system/bin/sh /system/etc/init/t545/jack.sh
+    disabled
+    user root
+    group root
+
+on property:sys.boot_completed=1
+    start t545_jack
+
+# AIDL vibrator HAL for the timed_output node (the vendor Samsung HAL is HIDL, which the Android 16 framework no longer uses)
+service t545_vibrator /system/etc/init/t545/vibrator-service
+    class hal
+    user system
+    group system
+
+# AIDL lights HAL for the panel backlight (the stock Samsung HAL reports no lights on this kernel: no brightness control)
+service t545_lights /system/etc/init/t545/light-service
+    class hal
+    user system
+    group system
+
+on boot
+    chown system system /sys/class/backlight/panel/brightness
+    chmod 0664 /sys/class/backlight/panel/brightness
+
+# boot time: the kernel starts with the performance cpufreq governor (cpufreq.default_governor in the boot args, every exec at boot
+# is ~35 % faster); schedutil once the boot is done
+on property:sys.boot_completed=1
+    write /sys/devices/system/cpu/cpufreq/policy0/scaling_governor schedutil
+    write /sys/devices/system/cpu/cpufreq/policy6/scaling_governor schedutil
+
+# /dev/hw_random (qcom-rng): the stock vendor ueventd.rc (Android 11, no prng_seeder) makes it 0600 root, and prng_seeder starts in
+# early-init, before ueventd's coldboot: give it the platform's owner and mode afterwards and start prng_seeder again
+on property:ro.cold_boot_done=true
+    chown prng_seeder prng_seeder /dev/hw_random
+    chmod 0400 /dev/hw_random
+    restart prng_seeder
+
+# factory reset protection block: loop6 on a file of the persist partition (prep.sh frp), which the vendor's "on fs" mount_all mounted
+on post-fs
+    exec - root root -- /system/bin/sh /system/etc/init/t545/prep.sh frp

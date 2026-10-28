@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 3.5 mm jack: the kernel reports SW_HEADPHONE_INSERT / SW_MICROPHONE_INSERT on the "SM-T545 Headset Jack" input device, there is no
+         /sys/class/switch/h2w (WiredAccessoryManager: "This kernel does not have wired headset support"). -->
+    <bool name="config_useDevInputEventForAudioJack">true</bool>
+
+    <!-- Adaptive brightness from the vcnl36658 ambient light sensor (ADSP sensors). Lux thresholds -> backlight levels of the
+         panel (0..255 through the stock lights HAL, /sys/class/backlight/panel); one more backlight value than thresholds. -->
+    <bool name="config_automatic_brightness_available">true</bool>
+    <integer-array name="config_autoBrightnessLevels">
+        <item>2</item>
+        <item>5</item>
+        <item>10</item>
+        <item>20</item>
+        <item>40</item>
+        <item>80</item>
+        <item>150</item>
+        <item>300</item>
+        <item>600</item>
+        <item>1200</item>
+        <item>2500</item>
+        <item>5000</item>
+    </integer-array>
+    <integer-array name="config_autoBrightnessLcdBacklightValues">
+        <item>10</item>
+        <item>16</item>
+        <item>24</item>
+        <item>34</item>
+        <item>48</item>
+        <item>66</item>
+        <item>90</item>
+        <item>120</item>
+        <item>155</item>
+        <item>195</item>
+        <item>228</item>
+        <item>248</item>
+        <item>255</item>
+    </integer-array>
+</resources>

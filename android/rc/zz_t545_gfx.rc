@@ -1,0 +1,115 @@
+# Graphics stack replacement. The Qualcomm sdm composer/allocator need the downstream msm_drm/ION stack; mainline has the DPU DRM driver and no GPU:
+# gralloc = minigbm (msm backend, dma-buf heaps), composer = drm_hwcomposer (hwc3 AIDL), GL = ANGLE on SwiftShader Vulkan (ro.hardware.egl=angle,
+# the vendor build.prop sets ro.hardware.egl/vulkan=adreno and the init loader lets the last file win, so the overlay shadows libEGL_adreno etc. by name).
+# The payload lives in /cache/t545 (pushed from stock Android with adb, so no boot image rebuild is needed for every library change).
+# ANGLE (/system/lib64/libEGL_angle.so, already in the system image) is selected by persist.graphics.egl; its Vulkan backend finds SwiftShader
+# as vulkan.adreno.so (the overlay shadows the stock Adreno ICD by name, ro.hardware.vulkan=adreno)
+on init
+    setprop persist.graphics.egl angle
+    # msm backend of minigbm hands out UBWC (compressed modifier) buffers, which it refuses to mmap: SwiftShader needs CPU access
+    setprop vendor.minigbm.debug nocompression
+    setprop vendor.hwc.drm.device /dev/dri/card1
+
+on post-fs
+    restorecon_recursive /cache/t545
+    exec - root root -- /system/bin/sh /system/etc/init/t545/gfx.sh
+
+service vendor.qti.hardware.display.allocator /system/bin/true
+    disabled
+    oneshot
+service vendor.hwcomposer-2-3 /system/bin/true
+    disabled
+    oneshot
+service display-color-hal-1-0 /system/bin/true
+    disabled
+    oneshot
+service qdcmss /system/bin/true
+    disabled
+    oneshot
+
+service t545_allocator /cache/t545/bin/allocator-minigbm_msm
+    class hal
+    user system
+    group graphics drmrpc
+    setenv LD_LIBRARY_PATH /cache/t545/lib
+
+service t545_hwc3 /cache/t545/bin/hwc3-drm
+    class hal animation
+    user system
+    group graphics drmrpc
+    capabilities SYS_NICE
+    setenv LD_LIBRARY_PATH /cache/t545/lib
+    onrestart restart surfaceflinger
+
+# software HIDL Gatekeeper (the vendor one needs TrustZone): BiometricService refuses to start without it
+service t545_gatekeeper /cache/t545/bin/gatekeeper-software
+    class hal
+    user system
+    group system
+    setenv LD_LIBRARY_PATH /cache/t545/lib
+
+# persistent debug log on the real /cache partition (survives a hard reset, readable from stock Android under /cache/t545/)
+service t545_logfile /system/bin/logcat -b all -v threadtime -f /cache/t545/logcat.txt -r 4096 -n 2 *:W
+    disabled
+    user root
+    group root log
+service t545_cachelog /system/bin/sh /system/etc/init/t545/cachelog.sh
+    disabled
+    user root
+    group root
+
+on late-fs
+    start t545_logfile
+    start t545_cachelog
+
+# first-screen helper (see t545-postboot.sh)
+service t545_postboot /system/bin/sh /system/etc/init/t545/postboot.sh
+    disabled
+    oneshot
+    user root
+    group root
+
+on property:sys.boot_completed=1
+    start t545_postboot
+
+# Modem (runs the Wi-Fi firmware): EFS server and TFTP server (linux-msm, NDK builds), started by modem.sh before it boots the MSS
+service t545_rmtfs /system/etc/init/t545/rmtfs -o /data/vendor/t545rmtfs
+    user root
+    group root
+    disabled
+service t545_tqftpserv /system/etc/init/t545/tqftpserv
+    user root
+    group root
+    disabled
+
+on post-fs-data
+    exec - root root -- /system/bin/sh /system/etc/init/t545/modem.sh
+
+# FastRPC file server for the ADSP sensor hub (started by gfx.sh once the ADSP runs)
+service t545_hrpcd /system/etc/init/t545/hexagonrpcd -f /dev/fastrpc-adsp-secure -d adsp -s -R /dev/t545hrpc
+    user root
+    group root
+    setenv LD_LIBRARY_PATH /system/etc/init/t545
+    disabled
+
+# boot time: the slow parts of gfx.sh (ADSP start) and modem.sh (MSS boot) in the background instead of in their exec actions
+service t545_adsp /system/bin/sh /system/etc/init/t545/gfx.sh adsp
+    user root
+    group root
+    disabled
+    oneshot
+service t545_mss /system/bin/sh /system/etc/init/t545/modem.sh mss
+    user root
+    group root
+    disabled
+    oneshot
+
+# Bluetooth: WCN3990 on uart6 is driven by the kernel (hci_qca loads qca/crbtfw21.tlv + crnv21.bin when hci0 opens); the AOSP default
+# IBluetoothHci talks to it over the HCI user channel. System build of it (device/t545/bthal) plus its AIDL NDK library.
+service t545_bluetooth_hal /system/etc/init/t545/bluetooth-hal
+    class hal
+    capabilities BLOCK_SUSPEND NET_ADMIN SYS_NICE
+    user bluetooth
+    group bluetooth
+    setenv LD_LIBRARY_PATH /system/etc/init/t545
+    task_profiles HighPerformance

@@ -1,0 +1,24 @@
+# Venus hardware video codec: modules + firmware (t545-venus.sh), then the Codec2 HAL on its V4L2 nodes (fork of external/v4l2_codec2,
+# system binary with its own libs in /cache/t545/c2, IComponentStore/default1 declared in km/vintf). zz_t545_gfx.rc's post-fs exec
+# (gfx.sh: firmware_class.path) runs before this file's post-fs action.
+service t545_venus /system/bin/sh /system/etc/init/t545/venus.sh
+    disabled
+    oneshot
+    user root
+    group root
+
+on post-fs
+    start t545_venus
+
+service t545_media_c2 /cache/t545/c2/media-c2-v4l2
+    class hal
+    disabled
+    user media
+    group mediadrm drmrpc camera graphics system
+    ioprio rt 4
+    task_profiles ProcessCapacityHigh
+    setenv LD_LIBRARY_PATH /cache/t545/c2
+
+# in case venus.sh did not get that far
+on property:sys.boot_completed=1
+    start t545_media_c2

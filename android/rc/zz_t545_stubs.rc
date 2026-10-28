@@ -1,0 +1,135 @@
+# Modem/DSP/audio/camera/sensor vendor daemons need drivers that mainline does not have yet: they crash-loop and eat the CPUs (same stub trick as the TEE services)
+service vendor.dspservice /system/bin/true
+    disabled
+    oneshot
+# Camera: the stock name, but the AOSP 64-bit legacy provider (bind-mounted over the Samsung binary by gfx.sh) with the libcamera HAL
+# (CAMSS raw sensor + CPU software ISP). Rear camera only so far; max 2100x1560 (the CPU ISP is the bottleneck).
+on init
+    setprop ro.hardware.camera libcamera
+
+service sec-camera-provider-4-0 /vendor/bin/hw/vendor.samsung.hardware.camera.provider@4.0-service
+    interface android.hardware.camera.provider@2.5::ICameraProvider legacy/0
+    interface android.hardware.camera.provider@2.4::ICameraProvider legacy/0
+    class hal
+    user cameraserver
+    group audio camera input drmrpc system media_rw sdcard_rw media
+    ioprio rt 4
+    capabilities SYS_NICE
+    task_profiles CameraServiceCapacity MaxPerformance
+    setenv LIBCAMERA_LOG_FILE syslog
+    setenv LIBCAMERA_LOG_LEVELS *:INFO
+    setenv LIBCAMERA_HAL_MAX_RESOLUTION 2100x1560
+service ril-daemon /system/bin/true
+    disabled
+    oneshot
+service ril-daemon1 /system/bin/true
+    disabled
+    oneshot
+service vendor.ril-daemon /system/bin/true
+    disabled
+    oneshot
+service vendor.ril-daemon2 /system/bin/true
+    disabled
+    oneshot
+service vendor.ril-daemon3 /system/bin/true
+    disabled
+    oneshot
+service factory_ssc /system/bin/true
+    disabled
+    oneshot
+service vendor.per_proxy /system/bin/true
+    disabled
+    oneshot
+service vendor.per_mgr /system/bin/true
+    disabled
+    oneshot
+service vendor.atfwd /system/bin/true
+    disabled
+    oneshot
+service vendor.tftp_server /system/bin/true
+    disabled
+    oneshot
+service vendor.cdsprpcd /system/bin/true
+    disabled
+    oneshot
+# qcacld's BDF/QMI helper: ath10k_snoc downloads the board data itself, a second QMI client races it. A stub service does not work here:
+# init.qcom.rc is imported by init.rc, so its definition is parsed first and wins.
+on property:init.svc.cnss-daemon=running
+    stop cnss-daemon
+service vendor.adsprpcd /system/bin/true
+    disabled
+    oneshot
+service vendor.adsprpcd_audiopd /system/bin/true
+    disabled
+    oneshot
+service vendor.adsprpcd_sensorspd /system/bin/true
+    disabled
+    oneshot
+service vendor.pd_mapper /system/bin/true
+    disabled
+    oneshot
+service vendor.sensors /system/bin/true
+    disabled
+    oneshot
+service vendor.sensors.qti /system/bin/true
+    disabled
+    oneshot
+service vendor.sensingdaemon /system/bin/true
+    disabled
+    oneshot
+service qmuxd /system/bin/true
+    disabled
+    oneshot
+service qmiproxy /system/bin/true
+    disabled
+    oneshot
+service hbtp /system/bin/true
+    disabled
+    oneshot
+
+# Samsung AIDL power HAL (HyPer): once system_server's PowerManager talks to it the tablet hard-resets within seconds (no panic, no log): bisected
+# by stopping vendor.power-hal-1-0 / perf-hal / vendor.samsung.power-default one by one. Only vendor.samsung.power-default kills it.
+service vendor.samsung.power-default /system/bin/true
+    disabled
+    oneshot
+# no function on mainline (TrustZone services, Samsung framework helpers): stubbed instead of SELinux rules (LKM906)
+service emservice /system/bin/true
+    disabled
+    oneshot
+service vendor-samsung-hardware-media-converter-hal-1-0 /system/bin/true
+    disabled
+    oneshot
+service vendor.fps_hal /system/bin/true
+    disabled
+    oneshot
+service vendor.samsung.hardware.hyper-default /system/bin/true
+    disabled
+    oneshot
+service cryptfshw-1-0 /system/bin/true
+    disabled
+    oneshot
+service SehHdcpKeyProvisioning-1-0 /system/bin/true
+    disabled
+    oneshot
+service snapsecserv /system/bin/true
+    disabled
+    oneshot
+service snapserv /system/bin/true
+    disabled
+    oneshot
+service seemp_healthd /system/bin/true
+    disabled
+    oneshot
+service vendor.servicetracker-1-2 /system/bin/true
+    disabled
+    oneshot
+service cnss_diag /system/bin/true
+    disabled
+    oneshot
+service vendor.mutualex /system/bin/true
+    disabled
+    oneshot
+# replaced by t545_lights (zz_t545_km.rc)
+service vendor.samsung.hardware.light-default /system/bin/true
+    disabled
+    oneshot

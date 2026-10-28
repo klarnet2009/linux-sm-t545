@@ -1,0 +1,81 @@
+; SM-T545 mainline: rules from the LKM928 captures (25.10: a boot without audit rate limit, a walk through the functions, and
+; the same walk with every dontaudit compiled out). t545_rules3.cil (the LKM907 enforcing boot) covers the rest.
+
+; fsck.f2fs reads the "zoned" attribute of the eMMC's block queue
+(allow fsck sysfs (file (getattr open read)))
+
+; factory reset protection block (prep.sh frp): a file on the persist partition behind loop6 (/dev/block/persistent)
+(allow sec_system_init_shell mnt_vendor_file (dir (search getattr open read write add_name remove_name create)))
+(allow sec_system_init_shell mnt_vendor_file (file (create getattr open read write rename setattr)))
+(allow kernel mnt_vendor_file (file (getattr read write)))
+
+; gfx.sh: chmod o+x /cache (the camera HAL's configs live in /cache/t545)
+(allow sec_system_init_shell cache_file (dir (getattr setattr)))
+
+; our scripts run "cmd window"; system_server writes the output into their pipe
+(allow sec_system_init_shell window_service (service_manager (find)))
+(allow system_server sec_system_init_shell (fifo_file (write getattr)))
+(allow system_server sec_system_init_shell (fd (use)))
+
+; the vendor qseecomd.rc "wait /dev/qseecom" finds prep.sh's placeholder file (else a 5 s wait comes back)
+(allow vendor_init device (file (getattr)))
+
+; memfd buffers between audioserver and system_server (SoundPool; ashmem is memfd here)
+(allow system_server audioserver_tmpfs (file (getattr read write map)))
+(allow audioserver system_server_tmpfs (file (getattr read write map)))
+
+; light-service and hexagonrpcd (NDK builds in /system/etc/init/t545): the linker probes these directories, nothing is missing
+(dontaudit hal_light_default shell_test_data_file (dir (search getattr)))
+(dontaudit hal_light_default shell_data_file (dir (search)))
+(dontaudit hal_light_default postinstall_mnt_dir (dir (getattr)))
+(dontaudit hal_light_default system_data_root_file (dir (read)))
+(dontaudit t545_hexrpcd shell_test_data_file (dir (search getattr)))
+(dontaudit t545_hexrpcd shell_data_file (dir (search)))
+
+; enforcing boot (LKM928E): our boot scripts start and stop services ("start t545_adsp", "start t545_mss", "start t545_rmtfs",
+; "start t545_hrpcd"; postboot stops the perf HALs), and so does the vendor's qti_init_shell
+(allow sec_system_init_shell ctl_start_prop (property_service (set)))
+(allow sec_system_init_shell ctl_stop_prop (property_service (set)))
+(allow sec_system_init_shell ctl_restart_prop (property_service (set)))
+(allow qti_init_shell ctl_start_prop (property_service (set)))
+; prep.sh frp: losetup -d (LOOP_CLR_FD) and the other loop ioctls of the FRP block
+(allowx sec_system_init_shell loop_device (ioctl blk_file ((range 0x4c00 0x4cff))))
+; prep.sh: ln -sf of the Qualcomm 4.9 eMMC path (temporary name, then rename)
+(allow sec_system_init_shell block_device (dir (remove_name)))
+(allow sec_system_init_shell block_device (lnk_file (rename unlink)))
+(allow sec_system_init_shell block_device (file (create getattr unlink rename)))
+
+; our services in stock domains find their libraries through LD_LIBRARY_PATH (setenv in the rc files), which the linker ignores
+; in an AT_SECURE process: init must not set AT_SECURE when it starts them (permissive boots hid this; t545_daemon() covers ours)
+(allow init hal_bluetooth_default (process (noatsecure)))
+(allow init mediacodec (process (noatsecure)))
+(allow init hal_graphics_composer_default (process (noatsecure)))
+(allow init hal_graphics_allocator_default (process (noatsecure)))
+(allow init hal_gatekeeper_default (process (noatsecure)))
+
+; our boot scripts (prep.sh, gfx.sh, modem.sh, venus.sh, postboot.sh, ...: overlays, firmware links in /dev, relabels, mounts, service
+; starts) stay permissive for now; everything else is enforcing. Their denials keep being logged for a later tightening.
+(typepermissive sec_system_init_shell)
+
+; prep.sh: ln -sf writes its temporary link name as a file first
+(allow sec_system_init_shell block_device (file (open read write)))
+
+; codec message queues (FMQ memfds, plain tmpfs) handed to mediaserver's software decoders (.vorbis.decoder: ogg ringtones)
+(allow mediaserver tmpfs (file (getattr read write map)))
+
+; the HIDL allocator tests memfd support by writing its own memfd (plain tmpfs); without it, it falls back to ashmem (none here)
+(allow hal_allocator_default tmpfs (file (getattr read write map)))
+; first boot after the /data format: hexagonrpcd's linker probes the still unlabelled /data root (init relabels it later)
+(dontaudit t545_hexrpcd unlabeled (dir (search read getattr)))
+
+; rmtfs/tqftpserv keep the modem's EFS copies and TFTP read-write files (server_check.txt, mcfg.tmp, ...) in /data/vendor: after a
+; /data wipe they create them again (stat, O_TRUNC, rename); without these the modem's WLAN never came up under enforcing
+(allow t545_qrtr vendor_data_file (dir (search getattr open read write add_name remove_name)))
+(allow t545_qrtr vendor_data_file (file (create getattr setattr open read write append lock map unlink rename)))
+; the HIDL allocator tests memfd support by writing its own memfd (ioctl too)
+(allow hal_allocator_default tmpfs (file (ioctl)))
+
+; first boot on an empty /data: vendor_init makes a "firmware" directory in a mediaserver_data_file directory
+(allow vendor_init mediaserver_data_file (dir (create add_name remove_name write search getattr setattr open read)))
+; the HIDL allocator's memfd test uses ioctl 0x7704 on its own tmpfs file; the ioctl is filtered by xperm (plain "ioctl" was not enough)
+(allowx hal_allocator_default tmpfs (ioctl file ((range 0x7704 0x7704))))
