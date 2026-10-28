@@ -1,0 +1,48 @@
+diff --git a/compositor/FlatteningController.cpp b/compositor/FlatteningController.cpp
+index efd7ad0..e75dd5f 100644
+--- a/compositor/FlatteningController.cpp
++++ b/compositor/FlatteningController.cpp
+@@ -64,7 +64,7 @@ bool FlatteningController::NewFrame() {
+     return true;
+   }
+ 
+-  sleep_until_ = std::chrono::system_clock::now() + kTimeout;
++  sleep_until_ = std::chrono::steady_clock::now() + kTimeout;
+   if (disabled_) {
+     wake_it = true;
+     disabled_ = false;
+@@ -83,12 +83,19 @@ void FlatteningController::ThreadFn(
+     if (fc.use_count() == 1 || !fc->cbks_.trigger)
+       break;
+ 
+-    if (fc->sleep_until_ <= std::chrono::system_clock::now() &&
++    if (fc->sleep_until_ <= std::chrono::steady_clock::now() &&
+         !fc->disabled_) {
+       fc->disabled_ = true;
+       fc->flatten_next_frame_ = true;
+       ALOGV("Timeout. Sending an event to compositor");
+-      fc->cbks_.trigger();
++      /* Do not call back into the composer with mutex_ held. The callback
++       * takes the composer client lock, while a binder thread that already
++       * holds that lock calls NewFrame(), which needs mutex_: an AB/BA
++       * deadlock that freezes the display for good. */
++      auto trigger = fc->cbks_.trigger;
++      lock.unlock();
++      trigger();
++      lock.lock();
+     }
+ 
+     if (fc->disabled_) {
+diff --git a/compositor/FlatteningController.h b/compositor/FlatteningController.h
+index 2be6ce4..f353aa3 100644
+--- a/compositor/FlatteningController.h
++++ b/compositor/FlatteningController.h
+@@ -62,7 +62,7 @@ class FlatteningController {
+ 
+   bool flatten_next_frame_{};
+   bool disabled_{};
+-  decltype(std::chrono::system_clock::now()) sleep_until_{};
++  decltype(std::chrono::steady_clock::now()) sleep_until_{};
+   std::mutex mutex_;
+   std::condition_variable cv_;
+   FlatConCallbacks cbks_;

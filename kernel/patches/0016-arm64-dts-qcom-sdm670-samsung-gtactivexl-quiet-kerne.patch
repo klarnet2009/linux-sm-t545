@@ -1,0 +1,27 @@
+From 17f02b78bcd7972d3c585f9dc0fbc2047d7a7327 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 20:03:02 +0200
+Subject: [PATCH 16/16] arm64: dts: qcom: sdm670-samsung-gtactivexl: quiet
+ kernel console
+
+Release builds do not put console=tty0, loglevel=8, ignore_loglevel and keep_bootcon on the command line any more; the kernel log of a reset is still kept in ramoops.
+---
+ arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts b/arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts
+index ca807e380..5702d1439 100644
+--- a/arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts
++++ b/arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts
+@@ -46,7 +46,7 @@ chosen {
+ 		#size-cells = <2>;
+ 		ranges;
+ 
+-		bootargs = "console=tty0 consoleblank=0 loglevel=8 ignore_loglevel keep_bootcon clk_ignore_unused pd_ignore_unused arm-smmu.disable_bypass=0 rdinit=/init t545.dl=0 t545.android=1 hung_task_panic=1 panic=1 firmware_class.path=/km/regdb androidboot.wificountrycode=LV androidboot.hardware=qcom androidboot.boot_devices=soc@0/7c4000.mmc androidboot.bootdevice=7c4000.mmc androidboot.selinux=enforcing androidboot.verifiedbootstate=orange androidboot.veritymode=disabled printk.devkmsg=on fbcon=vc:2-6 logo.nologo vt.global_cursor_default=0 log_buf_len=8M cpufreq.default_governor=performance transparent_hugepage=madvise";
++		bootargs = "consoleblank=0 quiet loglevel=3 clk_ignore_unused pd_ignore_unused arm-smmu.disable_bypass=0 rdinit=/init";
+ 
+ 		/* bring-up bisect: the chain loader clears this when the search is over (the initramfs reboots while it is 1) */
+ 		t545,bisect = <1>;
+-- 
+2.47.3
+

@@ -1,0 +1,35 @@
+From c0f85eb520ff9e3e502ea9028bf609c0886539f0 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 20:03:02 +0200
+Subject: [PATCH 15/16] dmaengine: qcom: gpi: drop the per-interrupt debug
+ print
+
+The t545dbg dev_info in the interrupt handler printed two lines per touch event (about 280 lines per second while using the touch screen) and flooded the log. The polled-state message becomes dev_dbg.
+---
+ drivers/dma/qcom/gpi.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/drivers/dma/qcom/gpi.c b/drivers/dma/qcom/gpi.c
+index 3a6bec7ed..d23a1b623 100644
+--- a/drivers/dma/qcom/gpi.c
++++ b/drivers/dma/qcom/gpi.c
+@@ -727,7 +727,7 @@ static int gpi_send_cmd(struct gpii *gpii, struct gchan *gchan,
+ 		}
+ 		writel_relaxed(U32_MAX, gpii->regs + GPII_n_CNTXT_SRC_CH_IRQ_CLR_OFFS(gpii->gpii_id));
+ 		writel_relaxed(U32_MAX, gpii->regs + GPII_n_CNTXT_SRC_EV_CH_IRQ_CLR_OFFS(gpii->gpii_id));
+-		dev_info(gpii->gpi_dev->dev, "t545dbg polled state after %s: ch=%d ev=%d\n",
++		dev_dbg(gpii->gpi_dev->dev, "t545dbg polled state after %s: ch=%d ev=%d\n",
+ 			 TO_GPI_CMD_STR(gpi_cmd), gchan ? gchan->ch_state : -1, gpii->ev_state);
+ 	}
+ 
+@@ -858,7 +858,6 @@ static irqreturn_t gpi_handle_irq(int irq, void *data)
+ 	u32 type, offset;
+ 	unsigned long flags;
+ 
+-	dev_info(gpii->gpi_dev->dev, "t545dbg irq %d gpii%u pm_state %d\n", irq, gpii_id, gpii->pm_state);
+ 
+ 	read_lock_irqsave(&gpii->pm_lock, flags);
+ 
+-- 
+2.47.3
+
