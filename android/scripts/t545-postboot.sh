@@ -65,6 +65,17 @@ log "cpusets: background $(cat /dev/cpuset/background/cpus) system-background $(
 # 19-20 ms like 1024 (0 gave 22-24 ms), FastMixer underruns unchanged, idle current unchanged
 echo 512 > /proc/sys/kernel/sched_util_clamp_min_rt_default
 log "rt uclamp min default: $(cat /proc/sys/kernel/sched_util_clamp_min_rt_default)"
+# GPU clock: the devfreq ramp (180 MHz idle, 50 ms polling) is what made scrolling stutter. A 430 MHz floor (the SoC's maximum, the GPU still power
+# collapses when idle) measured 26.10-28.10 on the Settings list: median frame 19 -> 13 ms, p99 40 -> 20 ms, janky 2.0 -> 0.5 %
+echo 430000000 > /sys/class/devfreq/5000000.gpu/min_freq 2>/dev/null
+log "gpu min freq: $(cat /sys/class/devfreq/5000000.gpu/min_freq 2>&1)"
+# Snappier default animations, set once so that the user's own choice in Developer options is never overridden
+if [ ! -f /data/local/.t545_anim ]; then
+  settings put global window_animation_scale 0.5
+  settings put global transition_animation_scale 0.5
+  settings put global animator_duration_scale 0.5
+  touch /data/local/.t545_anim
+fi
 am kill-all
 input keyevent KEYCODE_HOME
 log "done"

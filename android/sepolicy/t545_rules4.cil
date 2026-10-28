@@ -80,3 +80,9 @@
 (allow vendor_init mediaserver_data_file (dir (create add_name remove_name write search getattr setattr open read)))
 ; the HIDL allocator's memfd test uses ioctl 0x7704 on its own tmpfs file; the ioctl is filtered by xperm (plain "ioctl" was not enough)
 (allowx hal_allocator_default tmpfs (ioctl file ((range 0x7704 0x7704))))
+
+; the hardware-ISP driver (t545-icp) loads CAMERA_ICP.elf with request_firmware from the camera HAL's SWIspWorker thread; without this the
+; ISP never boots under enforcing and every frame comes out all-zero (solid green preview)
+(allow hal_camera_default vendor_firmware_file (system (firmware_load)))
+; memfd buffers handed from audioserver to the media codec service (SoundPool/ringtones)
+(allow mediaserver audioserver_tmpfs (file (read write getattr map)))
