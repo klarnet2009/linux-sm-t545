@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # "on post-fs": /cache is mounted. Put the payload libraries in front of /vendor/lib64 with a read-only overlay (lower layers only):
 # vulkan.pastel (SwiftShader) and the minigbm mapper in hw/, ANGLE in egl/, libdmabufheap/libdrm/libminigbm_gralloc_msm.
 log() { echo "t545-gfx: $*" > /dev/kmsg; }

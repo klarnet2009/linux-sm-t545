@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Venus hardware video codec: modules + firmware (t545-venus.sh), then the Codec2 HAL on its V4L2 nodes (fork of external/v4l2_codec2,
 # system binary with its own libs in /cache/t545/c2, IComponentStore/default1 declared in km/vintf). zz_t545_gfx.rc's post-fs exec
 # (gfx.sh: firmware_class.path) runs before this file's post-fs action.

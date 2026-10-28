@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SM-T545: framework settings that the mainline kernel needs. Built by ../build.sh, mounted into /product/overlay by prep.sh. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.t545.overlay.framework">
     <overlay android:targetPackage="android" android:isStatic="true" android:priority="90" />

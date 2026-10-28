@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Runs from "on early-init" of zz_t545_km.rc, after first-stage init mounted /vendor and before servicemanager reads the VINTF manifest.
 # boot time: the stock init.target.rc waits 5 s for the Qualcomm 4.9 path of the eMMC (mainline: soc@0), and qseecomd.rc
 # waits 5 s for /dev/qseecom (no TrustZone driver; qseecomd is stubbed): a link and an unusable placeholder end both waits

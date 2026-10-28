@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Runs from "on post-fs-data" of zz_t545_km.rc: the APEXes are mounted (init.rc waits for apexd.status=activated in its own post-fs-data
 # action, which runs first) and class main (media.extractor, media.swcodec) has not started yet.
 # ashmem is memfd on this kernel (sys.use_memfd): the media extractor/codec seccomp policies lack memfd_create/ftruncate/fcntl, so the

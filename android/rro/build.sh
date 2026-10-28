@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Builds the SM-T545 RROs on the build server (LineageOS host tools, test key): <dir> -> T545<Name>Overlay.apk
 set -e
 cd "$(dirname "$0")"

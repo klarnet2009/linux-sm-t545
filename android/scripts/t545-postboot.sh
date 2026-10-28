@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Runs once after sys.boot_completed (the RAM-backed /data is fresh on every boot, so this has to be repeated): make the first screen usable.
 # Setup wizard and the GApps search/TTS pieces crash or eat the little RAM left (3.5 GB, /data in zram), touch/pointer overlays show whether input works.
 log() { echo "t545-postboot: $*" > /dev/kmsg; }

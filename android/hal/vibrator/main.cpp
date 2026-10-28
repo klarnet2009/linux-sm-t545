@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // SM-T545 vibrator, AIDL android.hardware.vibrator.IVibrator V3 (the Android 16 framework has no HIDL vibrator support any more).
 // A coin DC motor driven on/off by the kernel timed_output node of drivers/misc/t545-vibrator.c: no amplitude, no effects, no composition.
 // The framework falls back to plain on/off waveforms for everything it cannot do with the capabilities reported here (none).

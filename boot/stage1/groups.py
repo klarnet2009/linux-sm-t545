@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """groups.py <dtb> -> prints groups.h for the stage1 stub.
 
 The bring-up bisect enables groups of /soc@0 nodes one at a time. Every controllable node carries an explicit

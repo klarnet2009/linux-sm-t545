@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /*
  * auditrate: sets the kernel audit rate limit and backlog through NETLINK_AUDIT (AUDIT_SET), like "auditctl -r N -b M".
  * logd limits SELinux denials to 5 per second, so most of them are lost while a policy is being written.

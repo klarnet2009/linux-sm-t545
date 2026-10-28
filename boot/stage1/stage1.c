@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 // SM-T545 mainline spike, stage 1: chain loader.
 // Samsung's bootloader only accepts a boot image whose appended DTB is the stock one (it applies the dtbo overlays
 // to it), so the real kernel travels inside this "kernel": [this stub][Linux Image][our DTB][initramfs].

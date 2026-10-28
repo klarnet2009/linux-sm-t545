@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SM-T545: tells LineageOS (lineage-sdk) that the tablet has an assist key (the "Active key", mapped to KEY_ASSISTANT in the DT),
      so Settings > System > Buttons offers press / long-press actions for it. Built by build.sh, mounted into /product/overlay by prep.sh. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.t545.overlay.lineagesdk">

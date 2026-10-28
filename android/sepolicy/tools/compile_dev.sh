@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
 # Offline replica of Android init's split-policy compile (system/core/init/selinux.cpp) for the SM-T545 mainline setup,
 # from the cil files copied off the tablet (dev/), plus extra cil files given as arguments (our rules).
 # usage: compile.sh OUT [extra.cil ...]

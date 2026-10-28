@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Own USB gadget handling for adbd (debugging). The stock rc flow loops on this kernel: its "sys.usb.ffs.ready=1" action re-runs on every
 # FunctionFS re-init of adbd, rebinds the UDC, the host sees a disconnect, adbd re-inits FunctionFS, ... so sys.usb.config is kept at
 # "t545" (no stock action matches) and the gadget is bound here, once adbd has written its descriptors (ep1 exists).

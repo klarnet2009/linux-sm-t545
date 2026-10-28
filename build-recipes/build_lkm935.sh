@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
 # LKM935 = LKM935 (RT clamp 512 in postboot.sh) + rules5 in t545_rules4.cil (vendor_init firmware dir on empty /data, allocator memfd ioctl 0x7704 xperm)
 set -e
 export PATH=/build/lineage/prebuilts/clang/host/linux-x86/clang-r547379/bin:$PATH

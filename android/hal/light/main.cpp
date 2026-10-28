@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // SM-T545 lights, AIDL android.hardware.light.ILights V2: only the panel backlight (HX8279 PWM, /sys/class/backlight/panel).
 // The stock Samsung lights HAL registers the same instance but reports no lights on this kernel, so the framework had no
 // backlight and the brightness slider did nothing.

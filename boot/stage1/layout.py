@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """layout.py <Image> <dtb> <initramfs>  -> prints the -D flags the stage1 stub is compiled with.
    assemble.py-style mode:  layout.py --assemble <stub> <Image> <dtb> <initramfs> <out>"""
 import struct

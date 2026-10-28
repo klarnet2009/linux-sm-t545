@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
 # stage-1 chain-loader boot image for SM-T545:
 #   kernel part of boot.img = gzip( stub | Linux Image (mainline) | our DTB | initramfs ) + the STOCK dt0.dtb
 # usage: build_stage1.sh <name>

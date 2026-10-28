@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- SM-T545: IBluetoothHci = t545_bluetooth_hal (AOSP default HAL on the kernel's hci0 user channel), see zz_t545_gfx.rc -->
 <manifest version="1.0" type="device">
     <hal format="aidl">

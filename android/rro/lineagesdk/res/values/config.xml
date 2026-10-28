@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 <resources>
     <!-- 8 = assist key, 64 = volume rocker. Home/back/app-switch are hardware keys too, but declaring them changes LineageOS'
          navigation bar handling, so only the key that needs settings is declared. -->

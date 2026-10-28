@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Graphics stack replacement. The Qualcomm sdm composer/allocator need the downstream msm_drm/ION stack; mainline has the DPU DRM driver and no GPU:
 # gralloc = minigbm (msm backend, dma-buf heaps), composer = drm_hwcomposer (hwc3 AIDL), GL = ANGLE on SwiftShader Vulkan (ro.hardware.egl=angle,
 # the vendor build.prop sets ro.hardware.egl/vulkan=adreno and the init loader lets the last file win, so the overlay shadows libEGL_adreno etc. by name).

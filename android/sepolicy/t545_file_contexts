@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # SM-T545 mainline: labels for /cache/t545 and the tmpfs overlays (appended to system_ext_file_contexts)
 /cache/t545(/.*)?                                       u:object_r:t545_cache_file:s0
 /cache/t545/vlib(/.*)?                                  u:object_r:same_process_hal_file:s0

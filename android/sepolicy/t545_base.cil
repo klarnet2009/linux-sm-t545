@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: Apache-2.0
 ; SM-T545 mainline: types and domains for what lives outside the stock partitions (/cache/t545, the tmpfs overlay of
 ; /system/etc/init). Appended to system_ext_sepolicy.cil; file labels in t545_file_contexts.
 

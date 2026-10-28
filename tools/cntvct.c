@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /* time since the arch counter started (SoC reset) vs. CLOCK_BOOTTIME: the difference is what ran before the kernel */
 #include <stdio.h>
 #include <stdint.h>

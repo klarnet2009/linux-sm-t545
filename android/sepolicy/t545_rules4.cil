@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: Apache-2.0
 ; SM-T545 mainline: rules from the LKM928 captures (25.10: a boot without audit rate limit, a walk through the functions, and
 ; the same walk with every dontaudit compiled out). t545_rules3.cil (the LKM907 enforcing boot) covers the rest.
 

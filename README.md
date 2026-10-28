@@ -52,10 +52,16 @@ The boot image is then assembled by `boot/stage1/build_stage1.sh`, which needs t
 
 ## Licences
 
-The kernel patches and every kernel source file in them are GPL-2.0 (see the SPDX line of each file) and are derived from Linux and from the
-sdm670-mainline tree. Authorship of third-party parts is kept in the patches (for example the S5K3L6 binding comes from an RFC series).
-The scripts, rc files, SELinux additions, HALs and tools outside `kernel/` have **no licence file yet**; the author has to choose one before
-this is published.
+Every file carries an SPDX line; the license texts are in `LICENSES/`.
+
+| Where | Licence | Why |
+|---|---|---|
+| `kernel/` | GPL-2.0 | Patches to Linux and the new kernel drivers (SPDX line of each file inside the patches) |
+| `boot/` | GPL-2.0-only | The stage-1 stub embeds the VGA 8x16 font of the Linux kernel (`lib/fonts/font_8x16.c`), so the stub is a GPL-2.0 work; the kexec helpers already were |
+| `android/`, `build-recipes/`, `tools/` | Apache-2.0 | Same licence as AOSP and LineageOS, which these files plug into |
+
+A file that states its own SPDX line keeps it. Copyright 2026 klarnet2009. Authorship of third-party parts is kept in the patches (for example
+the S5K3L6 binding comes from an RFC series). Not legal advice.
 
 ## Credits
 

@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # NDK build of the SM-T545 AIDL vibrator HAL (aidl generated from the frozen V3 interface of the Lineage tree)
 set -e
 cd "$(dirname "$0")"

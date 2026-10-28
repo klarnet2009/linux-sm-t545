@@ -1,1 +1,2 @@
+# SPDX-License-Identifier: Apache-2.0
 /dev/block/zram0 none swap defaults zramsize=1610612736,max_comp_streams=-1

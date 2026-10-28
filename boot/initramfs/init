@@ -1,4 +1,5 @@
 #!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-only
 # minimal initramfs for the SM-T545 mainline proof of life
 /bin/busybox --install -s /bin
 mount -t proc proc /proc

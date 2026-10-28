@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """patch_dtb.py <dtb> <group-mask> <out> : enable the groups of groups.py in the DTB (status "disabled" -> "okay") and clear t545,bisect"""
 import importlib.util
 import struct

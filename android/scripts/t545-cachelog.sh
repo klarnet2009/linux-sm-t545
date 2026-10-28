@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Health sampler for post-mortems of the random resets: temperatures, memory pressure, battery, CPU frequencies every 30 s into
 # /cache/t545/health.txt (trimmed at 1 MB). The kernel log of a reset survives in ramoops (/sys/fs/pstore/console-ramoops-0); the old
 # 4 s period with a 300-line dmesg dump per cycle cost ~1 % of a CPU and ~0.5 GB/day of eMMC writes (LKM933).

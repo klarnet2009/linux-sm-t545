@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # "on post-fs-data" (zz_t545_gfx.rc): boots the modem (MSS, mainline qcom_q6v5_mss), which runs the WCN3990 Wi-Fi firmware; ath10k_snoc
 # (built in) then creates wlan0 as soon as the firmware's QMI service appears. Also links the Bluetooth firmware for hci_qca.
 log() { echo "t545-modem: $*" > /dev/kmsg; }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /* memdump ADDR SIZE: write SIZE bytes of physical memory at ADDR to stdout through an mmap of /dev/mem (read() fails on no-map regions) */
 #include <fcntl.h>
 #include <stdio.h>

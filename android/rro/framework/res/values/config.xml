@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 <resources>
     <!-- 3.5 mm jack: the kernel reports SW_HEADPHONE_INSERT / SW_MICROPHONE_INSERT on the "SM-T545 Headset Jack" input device, there is no
          /sys/class/switch/h2w (WiredAccessoryManager: "This kernel does not have wired headset support"). -->

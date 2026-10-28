@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # t545 (replaces the GSI's zz_zram.rc, see /init): zram swap with the kernel's default compressor (lzo-rle; the kernel has no lz4)
 on boot
     swapon_all /system/etc/init/t545/fstab.zram

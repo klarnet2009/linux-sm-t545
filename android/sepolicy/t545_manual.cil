@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: Apache-2.0
 ; SM-T545 mainline: hand-written rules (the generated ones are in t545_rules.cil)
 
 ; Mesa freedreno and minigbm talk DRM (0x64xx, the msm driver's own ioctls from 0x6440) to the render node; the platform

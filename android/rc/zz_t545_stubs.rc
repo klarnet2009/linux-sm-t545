@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Modem/DSP/audio/camera/sensor vendor daemons need drivers that mainline does not have yet: they crash-loop and eat the CPUs (same stub trick as the TEE services)
 service vendor.dspservice /system/bin/true
     disabled

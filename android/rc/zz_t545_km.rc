@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 on early-init
     # SELinux labels of the tmpfs overlays made by the initramfs (t545_file_contexts): our daemons get their domains from them
     restorecon_recursive /system/etc/init

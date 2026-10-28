@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # Venus video codec (started as t545_venus from "on post-fs", after gfx.sh set firmware_class.path to /dev/t545fw).
 # The driver is modules in /cache/t545/venus (built against the running kernel), so it can be replaced without a new boot image;
 # loading venus-core boots the Samsung-signed firmware (venus.mdt + .b00..b04 from the modem partition, PAS id 9) through TZ.

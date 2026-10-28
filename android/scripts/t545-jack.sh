@@ -1,4 +1,5 @@
 #!/system/bin/sh
+# SPDX-License-Identifier: Apache-2.0
 # SM-T545: 3.5 mm jack -> audio route. The tinyalsa HAL has one PCM (FE MultiMedia1) and q6routing keeps one back end per front end, so the
 # speaker (SEC_MI2S_RX -> CS35L41) and the headphones (INT0_MI2S_RX -> LPASS digital codec RX1/RX2 -> PM660L HPHL/HPHR) are exclusive:
 # plug in -> headphones, plug out -> speaker. The kernel (sdm845.c, GPIO jack) powers/unpowers the "Headphone Jack" DAPM pin by itself.

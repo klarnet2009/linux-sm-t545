@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # t545 (initramfs init): this copy of phh's rw-system.sh runs from vndk.rc instead of /system/bin/rw-system.sh, without the
 # /sys-wide find for a Focaltech node. Boot-time measurements: an execution trace with timestamps when /cache/t545/rwtrace exists.
 [ -f /cache/t545/rwtrace ] && { PS4='+$EPOCHREALTIME '; exec 2>/cache/t545/rwtrace.log; set -x; }
