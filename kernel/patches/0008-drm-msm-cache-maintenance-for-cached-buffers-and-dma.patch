@@ -1,0 +1,709 @@
+From 6a5cd05f49e732dc68d83716d6367205f1cb90e5 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:52 +0200
+Subject: [PATCH 08/14] drm/msm: cache maintenance for cached buffers and
+ dma-buf CPU access; DPU video prefill
+
+The GPU, display, camera and video DMA are not coherent on this SoC: clean and invalidate MSM_BO_CACHED objects around CPU access, implement begin/end_cpu_access for importers that mmap the dma-buf, and start video frames as early as the front porch allows (24 lines of prefill underrun while recording). Adds the Himax HX8279 panel driver of the SM-T545.
+---
+ .../drm/msm/disp/dpu1/dpu_encoder_phys_vid.c  |   3 +-
+ drivers/gpu/drm/msm/msm_gem.c                 |  25 +-
+ drivers/gpu/drm/msm/msm_gem.h                 |   1 +
+ drivers/gpu/drm/msm/msm_gem_prime.c           |  15 +
+ drivers/gpu/drm/panel/Kconfig                 |   8 +
+ drivers/gpu/drm/panel/Makefile                |   1 +
+ drivers/gpu/drm/panel/panel-t545-hx8279.c     | 545 ++++++++++++++++++
+ 7 files changed, 595 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/gpu/drm/panel/panel-t545-hx8279.c
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index 0ba777bda..feb9c4014 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -196,7 +196,8 @@ static u32 programmable_fetch_get_num_lines(
+ 		actual_vfp_lines = timing->v_front_porch;
+ 	} else {
+ 		DPU_DEBUG_VIDENC(phys_enc, "room in vfp for needed prefetch\n");
+-		actual_vfp_lines = needed_vfp_lines;
++		/* t545: as early as the VFP allows; 24 lines of prefill underrun at frame start while video is recorded */
++		actual_vfp_lines = timing->v_front_porch - 1;
+ 	}
+ 
+ 	DPU_DEBUG_VIDENC(phys_enc,
+diff --git a/drivers/gpu/drm/msm/msm_gem.c b/drivers/gpu/drm/msm/msm_gem.c
+index 017411a0b..723648970 100644
+--- a/drivers/gpu/drm/msm/msm_gem.c
++++ b/drivers/gpu/drm/msm/msm_gem.c
+@@ -141,6 +141,25 @@ static void sync_for_cpu(struct msm_gem_object *msm_obj)
+ 	dma_unmap_sgtable(dev, msm_obj->sgt, DMA_BIDIRECTIONAL, 0);
+ }
+ 
++/*
++ * t545: MSM_BO_CACHED objects are CPU cached on a SoC whose GPU, display, camera and video DMA are not coherent:
++ * clean + invalidate their pages around CPU access (map = clean, unmap = invalidate, as above).
++ */
++static void sync_cached_locked(struct msm_gem_object *msm_obj)
++{
++	if ((msm_obj->flags & MSM_BO_CACHE_MASK) != MSM_BO_CACHED || !msm_obj->sgt)
++		return;
++	sync_for_device(msm_obj);
++	sync_for_cpu(msm_obj);
++}
++
++void msm_gem_cpu_sync(struct drm_gem_object *obj)
++{
++	msm_gem_lock(obj);
++	sync_cached_locked(to_msm_bo(obj));
++	msm_gem_unlock(obj);
++}
++
+ static void update_lru_active(struct drm_gem_object *obj)
+ {
+ 	struct msm_drm_private *priv = obj->dev->dev_private;
+@@ -221,6 +240,8 @@ static struct page **get_pages(struct drm_gem_object *obj)
+ 		 */
+ 		if (msm_obj->flags & MSM_BO_WC)
+ 			sync_for_device(msm_obj);
++		/* t545: also the zeroed pages of cached objects, their dirty lines would land on device data later */
++		sync_cached_locked(msm_obj);
+ 
+ 		update_lru(obj);
+ 	}
+@@ -964,14 +985,14 @@ int msm_gem_cpu_prep(struct drm_gem_object *obj, uint32_t op, ktime_t *timeout)
+ 	else if (ret < 0)
+ 		return ret;
+ 
+-	/* TODO cache maintenance */
++	msm_gem_cpu_sync(obj);
+ 
+ 	return 0;
+ }
+ 
+ int msm_gem_cpu_fini(struct drm_gem_object *obj)
+ {
+-	/* TODO cache maintenance */
++	msm_gem_cpu_sync(obj);
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/msm/msm_gem.h b/drivers/gpu/drm/msm/msm_gem.h
+index a4cf31853..9f299bc56 100644
+--- a/drivers/gpu/drm/msm/msm_gem.h
++++ b/drivers/gpu/drm/msm/msm_gem.h
+@@ -296,6 +296,7 @@ int msm_gem_madvise(struct drm_gem_object *obj, unsigned madv);
+ bool msm_gem_active(struct drm_gem_object *obj);
+ int msm_gem_cpu_prep(struct drm_gem_object *obj, uint32_t op, ktime_t *timeout);
+ int msm_gem_cpu_fini(struct drm_gem_object *obj);
++void msm_gem_cpu_sync(struct drm_gem_object *obj);
+ int msm_gem_new_handle(struct drm_device *dev, struct drm_file *file,
+ 		size_t size, uint32_t flags, uint32_t *handle, char *name);
+ struct drm_gem_object *msm_gem_new(struct drm_device *dev,
+diff --git a/drivers/gpu/drm/msm/msm_gem_prime.c b/drivers/gpu/drm/msm/msm_gem_prime.c
+index 036d34c67..5f4bb99e5 100644
+--- a/drivers/gpu/drm/msm/msm_gem_prime.c
++++ b/drivers/gpu/drm/msm/msm_gem_prime.c
+@@ -51,7 +51,22 @@ static void msm_gem_dmabuf_release(struct dma_buf *dma_buf)
+ 	drm_gem_dmabuf_release(dma_buf);
+ }
+ 
++/* t545: DMA_BUF_IOCTL_SYNC from importers that mmap the dma-buf (camera, codec HALs): cache maintenance */
++static int msm_gem_dmabuf_begin_cpu_access(struct dma_buf *dma_buf, enum dma_data_direction dir)
++{
++	msm_gem_cpu_sync(dma_buf->priv);
++	return 0;
++}
++
++static int msm_gem_dmabuf_end_cpu_access(struct dma_buf *dma_buf, enum dma_data_direction dir)
++{
++	msm_gem_cpu_sync(dma_buf->priv);
++	return 0;
++}
++
+ static const struct dma_buf_ops msm_gem_prime_dmabuf_ops =  {
++	.begin_cpu_access = msm_gem_dmabuf_begin_cpu_access,
++	.end_cpu_access = msm_gem_dmabuf_end_cpu_access,
+ 	.attach = drm_gem_map_attach,
+ 	.detach = drm_gem_map_detach,
+ 	.map_dma_buf = drm_gem_map_dma_buf,
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index b9b0cca29..930b72966 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -1075,6 +1075,14 @@ config DRM_PANEL_EDP
+ 	  that it can be automatically turned off when the panel goes into a
+ 	  low power state.
+ 
++config DRM_PANEL_T545_HX8279
++	tristate "Samsung SM-T545 BOE TV101WUM (Himax HX8279) panel"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	help
++	  Panel of the Galaxy Tab Active Pro LTE (SM-T545), 1200x1920 DSI video mode.
++
+ config DRM_PANEL_SIMPLE
+ 	tristate "support for simple panels (other than eDP ones)"
+ 	depends on OF
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index 9c2a1abb0..668a1d508 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -122,3 +122,4 @@ obj-$(CONFIG_DRM_PANEL_VISIONOX_VTDR6130) += panel-visionox-vtdr6130.o
+ obj-$(CONFIG_DRM_PANEL_VISIONOX_R66451) += panel-visionox-r66451.o
+ obj-$(CONFIG_DRM_PANEL_WIDECHIPS_WS2401) += panel-widechips-ws2401.o
+ obj-$(CONFIG_DRM_PANEL_XINPENG_XPP055C272) += panel-xinpeng-xpp055c272.o
++obj-$(CONFIG_DRM_PANEL_T545_HX8279) += panel-t545-hx8279.o
+diff --git a/drivers/gpu/drm/panel/panel-t545-hx8279.c b/drivers/gpu/drm/panel/panel-t545-hx8279.c
+new file mode 100644
+index 000000000..51db8b793
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-t545-hx8279.c
+@@ -0,0 +1,545 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung Galaxy Tab Active Pro (SM-T545) panel: BOE TV101WUM, Himax HX8279, 1200x1920, 4 lanes, DSI video burst mode.
++ * The init sequence is the one of the stock kernel (generated by work/mainline/gen_panel.py from its device tree).
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++#include <video/mipi_display.h>
++
++struct t545_cmd {
++	u8 dtype;
++	u8 wait_ms;
++	u8 len;
++	u8 data[4];
++};
++
++static const struct t545_cmd t545_init[] = {
++	{ 0x39, 0, 2, { 0xb0, 0x05 } },
++	{ 0x39, 0, 2, { 0xb3, 0x52 } },
++	{ 0x39, 0, 2, { 0xb0, 0x06 } },
++	{ 0x39, 0, 2, { 0xb8, 0xa5 } },
++	{ 0x39, 0, 2, { 0xbc, 0x00 } },
++	{ 0x39, 0, 2, { 0xc0, 0xa5 } },
++	{ 0x39, 0, 2, { 0xc7, 0x0f } },
++	{ 0x39, 0, 2, { 0xd5, 0x32 } },
++	{ 0x39, 0, 2, { 0xb8, 0x00 } },
++	{ 0x39, 0, 2, { 0xc0, 0x00 } },
++	{ 0x39, 0, 2, { 0xb0, 0x01 } },
++	{ 0x39, 0, 2, { 0xe0, 0x26 } },
++	{ 0x39, 0, 2, { 0xe1, 0x26 } },
++	{ 0x39, 0, 2, { 0xdc, 0x00 } },
++	{ 0x39, 0, 2, { 0xdd, 0x00 } },
++	{ 0x39, 0, 2, { 0xcc, 0x26 } },
++	{ 0x39, 0, 2, { 0xcd, 0x26 } },
++	{ 0x39, 0, 2, { 0xc8, 0x00 } },
++	{ 0x39, 0, 2, { 0xc9, 0x00 } },
++	{ 0x39, 0, 2, { 0xd2, 0x03 } },
++	{ 0x39, 0, 2, { 0xd3, 0x03 } },
++	{ 0x39, 0, 2, { 0xe6, 0x04 } },
++	{ 0x39, 0, 2, { 0xe7, 0x04 } },
++	{ 0x39, 0, 2, { 0xc4, 0x09 } },
++	{ 0x39, 0, 2, { 0xc5, 0x09 } },
++	{ 0x39, 0, 2, { 0xd8, 0x0a } },
++	{ 0x39, 0, 2, { 0xd9, 0x0a } },
++	{ 0x39, 0, 2, { 0xc2, 0x0b } },
++	{ 0x39, 0, 2, { 0xc3, 0x0b } },
++	{ 0x39, 0, 2, { 0xd6, 0x0c } },
++	{ 0x39, 0, 2, { 0xd7, 0x0c } },
++	{ 0x39, 0, 2, { 0xc0, 0x05 } },
++	{ 0x39, 0, 2, { 0xc1, 0x05 } },
++	{ 0x39, 0, 2, { 0xd4, 0x06 } },
++	{ 0x39, 0, 2, { 0xd5, 0x06 } },
++	{ 0x39, 0, 2, { 0xca, 0x07 } },
++	{ 0x39, 0, 2, { 0xcb, 0x07 } },
++	{ 0x39, 0, 2, { 0xde, 0x08 } },
++	{ 0x39, 0, 2, { 0xdf, 0x08 } },
++	{ 0x39, 0, 2, { 0xb0, 0x03 } },
++	{ 0x39, 0, 2, { 0xc8, 0x0b } },
++	{ 0x39, 0, 2, { 0xc9, 0x07 } },
++	{ 0x39, 0, 2, { 0xc3, 0x00 } },
++	{ 0x39, 0, 2, { 0xe7, 0x00 } },
++	{ 0x39, 0, 2, { 0xc5, 0x2a } },
++	{ 0x39, 0, 2, { 0xde, 0x2a } },
++	{ 0x39, 0, 2, { 0xca, 0x43 } },
++	{ 0x39, 0, 2, { 0xe4, 0xc0 } },
++	{ 0x39, 0, 2, { 0xe5, 0x0d } },
++	{ 0x39, 0, 2, { 0xcb, 0x28 } },
++	{ 0x39, 0, 2, { 0xb0, 0x00 } },
++	{ 0x39, 0, 2, { 0xb6, 0x03 } },
++	{ 0x39, 0, 2, { 0xba, 0x87 } },
++	{ 0x39, 0, 2, { 0xbf, 0x15 } },
++	{ 0x39, 0, 2, { 0xc0, 0x0f } },
++	{ 0x39, 0, 2, { 0xc2, 0x09 } },
++	{ 0x39, 0, 2, { 0xc3, 0x02 } },
++	{ 0x39, 0, 2, { 0xc4, 0x0f } },
++	{ 0x39, 0, 2, { 0xc5, 0x02 } },
++	{ 0x39, 0, 2, { 0xb0, 0x02 } },
++	{ 0x39, 0, 2, { 0xc0, 0x00 } },
++	{ 0x39, 0, 2, { 0xc1, 0x04 } },
++	{ 0x39, 0, 2, { 0xc2, 0x15 } },
++	{ 0x39, 0, 2, { 0xc3, 0x26 } },
++	{ 0x39, 0, 2, { 0xc4, 0x2a } },
++	{ 0x39, 0, 2, { 0xc5, 0x2f } },
++	{ 0x39, 0, 2, { 0xc6, 0x32 } },
++	{ 0x39, 0, 2, { 0xc7, 0x36 } },
++	{ 0x39, 0, 2, { 0xc8, 0x3a } },
++	{ 0x39, 0, 2, { 0xc9, 0x37 } },
++	{ 0x39, 0, 2, { 0xca, 0x38 } },
++	{ 0x39, 0, 2, { 0xcb, 0x37 } },
++	{ 0x39, 0, 2, { 0xcc, 0x3f } },
++	{ 0x39, 0, 2, { 0xcd, 0x32 } },
++	{ 0x39, 0, 2, { 0xce, 0x34 } },
++	{ 0x39, 0, 2, { 0xcf, 0x33 } },
++	{ 0x39, 0, 2, { 0xd0, 0x07 } },
++	{ 0x39, 0, 2, { 0xd2, 0x04 } },
++	{ 0x39, 0, 2, { 0xd3, 0x0b } },
++	{ 0x39, 0, 2, { 0xd4, 0x17 } },
++	{ 0x39, 0, 2, { 0xd5, 0x2b } },
++	{ 0x39, 0, 2, { 0xd6, 0x38 } },
++	{ 0x39, 0, 2, { 0xd7, 0x3b } },
++	{ 0x39, 0, 2, { 0xd8, 0x3d } },
++	{ 0x39, 0, 2, { 0xd9, 0x3e } },
++	{ 0x39, 0, 2, { 0xda, 0x3e } },
++	{ 0x39, 0, 2, { 0xdb, 0x3f } },
++	{ 0x39, 0, 2, { 0xdc, 0x3f } },
++	{ 0x39, 0, 2, { 0xdd, 0x3f } },
++	{ 0x39, 0, 2, { 0xde, 0x3f } },
++	{ 0x39, 0, 2, { 0xdf, 0x32 } },
++	{ 0x39, 0, 2, { 0xe0, 0x30 } },
++	{ 0x39, 0, 2, { 0xe1, 0x2f } },
++	{ 0x39, 0, 2, { 0xe2, 0x00 } },
++	{ 0x39, 0, 2, { 0xb0, 0x07 } },
++	{ 0x39, 0, 2, { 0xb1, 0x00 } },
++	{ 0x39, 0, 2, { 0xb2, 0x00 } },
++	{ 0x39, 0, 2, { 0xb3, 0x0e } },
++	{ 0x39, 0, 2, { 0xb4, 0x1b } },
++	{ 0x39, 0, 2, { 0xb5, 0x2c } },
++	{ 0x39, 0, 2, { 0xb6, 0x39 } },
++	{ 0x39, 0, 2, { 0xb7, 0x5b } },
++	{ 0x39, 0, 2, { 0xb8, 0x7c } },
++	{ 0x39, 0, 2, { 0xb9, 0xbc } },
++	{ 0x39, 0, 2, { 0xba, 0xfb } },
++	{ 0x39, 0, 2, { 0xbb, 0x75 } },
++	{ 0x39, 0, 2, { 0xbc, 0xf5 } },
++	{ 0x39, 0, 2, { 0xbd, 0xf9 } },
++	{ 0x39, 0, 2, { 0xbe, 0x7b } },
++	{ 0x39, 0, 2, { 0xbf, 0x01 } },
++	{ 0x39, 0, 2, { 0xc0, 0x45 } },
++	{ 0x39, 0, 2, { 0xc1, 0x85 } },
++	{ 0x39, 0, 2, { 0xc2, 0xa1 } },
++	{ 0x39, 0, 2, { 0xc3, 0xbf } },
++	{ 0x39, 0, 2, { 0xc4, 0xcf } },
++	{ 0x39, 0, 2, { 0xc5, 0xde } },
++	{ 0x39, 0, 2, { 0xc6, 0xee } },
++	{ 0x39, 0, 2, { 0xc7, 0xf8 } },
++	{ 0x39, 0, 2, { 0xc8, 0xfc } },
++	{ 0x39, 0, 2, { 0xc9, 0x00 } },
++	{ 0x39, 0, 2, { 0xca, 0x00 } },
++	{ 0x39, 0, 2, { 0xcb, 0x05 } },
++	{ 0x39, 0, 2, { 0xcc, 0x6f } },
++	{ 0x39, 0, 2, { 0xcd, 0xff } },
++	{ 0x39, 0, 2, { 0xce, 0xff } },
++	{ 0x39, 0, 2, { 0xb0, 0x08 } },
++	{ 0x39, 0, 2, { 0xb1, 0x00 } },
++	{ 0x39, 0, 2, { 0xb2, 0x02 } },
++	{ 0x39, 0, 2, { 0xb3, 0x13 } },
++	{ 0x39, 0, 2, { 0xb4, 0x1e } },
++	{ 0x39, 0, 2, { 0xb5, 0x2c } },
++	{ 0x39, 0, 2, { 0xb6, 0x38 } },
++	{ 0x39, 0, 2, { 0xb7, 0x5b } },
++	{ 0x39, 0, 2, { 0xb8, 0x7b } },
++	{ 0x39, 0, 2, { 0xb9, 0xba } },
++	{ 0x39, 0, 2, { 0xba, 0xf9 } },
++	{ 0x39, 0, 2, { 0xbb, 0x72 } },
++	{ 0x39, 0, 2, { 0xbc, 0xf1 } },
++	{ 0x39, 0, 2, { 0xbd, 0xf5 } },
++	{ 0x39, 0, 2, { 0xbe, 0x76 } },
++	{ 0x39, 0, 2, { 0xbf, 0xfa } },
++	{ 0x39, 0, 2, { 0xc0, 0x3d } },
++	{ 0x39, 0, 2, { 0xc1, 0x7d } },
++	{ 0x39, 0, 2, { 0xc2, 0x9a } },
++	{ 0x39, 0, 2, { 0xc3, 0xb6 } },
++	{ 0x39, 0, 2, { 0xc4, 0xc5 } },
++	{ 0x39, 0, 2, { 0xc5, 0xd5 } },
++	{ 0x39, 0, 2, { 0xc6, 0xe4 } },
++	{ 0x39, 0, 2, { 0xc7, 0xec } },
++	{ 0x39, 0, 2, { 0xc8, 0xf0 } },
++	{ 0x39, 0, 2, { 0xc9, 0x00 } },
++	{ 0x39, 0, 2, { 0xca, 0x00 } },
++	{ 0x39, 0, 2, { 0xcb, 0x05 } },
++	{ 0x39, 0, 2, { 0xcc, 0x6b } },
++	{ 0x39, 0, 2, { 0xcd, 0xff } },
++	{ 0x39, 0, 2, { 0xce, 0xff } },
++	{ 0x39, 0, 2, { 0xb0, 0x09 } },
++	{ 0x39, 0, 2, { 0xb1, 0x00 } },
++	{ 0x39, 0, 2, { 0xb2, 0x10 } },
++	{ 0x39, 0, 2, { 0xb3, 0x14 } },
++	{ 0x39, 0, 2, { 0xb4, 0x1d } },
++	{ 0x39, 0, 2, { 0xb5, 0x2b } },
++	{ 0x39, 0, 2, { 0xb6, 0x37 } },
++	{ 0x39, 0, 2, { 0xb7, 0x5a } },
++	{ 0x39, 0, 2, { 0xb8, 0x7b } },
++	{ 0x39, 0, 2, { 0xb9, 0xbb } },
++	{ 0x39, 0, 2, { 0xba, 0xfb } },
++	{ 0x39, 0, 2, { 0xbb, 0x74 } },
++	{ 0x39, 0, 2, { 0xbc, 0xf4 } },
++	{ 0x39, 0, 2, { 0xbd, 0xf8 } },
++	{ 0x39, 0, 2, { 0xbe, 0x79 } },
++	{ 0x39, 0, 2, { 0xbf, 0xfb } },
++	{ 0x39, 0, 2, { 0xc0, 0x3c } },
++	{ 0x39, 0, 2, { 0xc1, 0x7b } },
++	{ 0x39, 0, 2, { 0xc2, 0x97 } },
++	{ 0x39, 0, 2, { 0xc3, 0xb2 } },
++	{ 0x39, 0, 2, { 0xc4, 0xc0 } },
++	{ 0x39, 0, 2, { 0xc5, 0xcf } },
++	{ 0x39, 0, 2, { 0xc6, 0xdc } },
++	{ 0x39, 0, 2, { 0xc7, 0xe4 } },
++	{ 0x39, 0, 2, { 0xc8, 0xe8 } },
++	{ 0x39, 0, 2, { 0xc9, 0x00 } },
++	{ 0x39, 0, 2, { 0xca, 0x00 } },
++	{ 0x39, 0, 2, { 0xcb, 0x05 } },
++	{ 0x39, 0, 2, { 0xcc, 0x6b } },
++	{ 0x39, 0, 2, { 0xcd, 0xff } },
++	{ 0x39, 0, 2, { 0xce, 0xff } },
++	{ 0x39, 0, 2, { 0xb0, 0x0a } },
++	{ 0x39, 0, 2, { 0xb1, 0x00 } },
++	{ 0x39, 0, 2, { 0xb2, 0x00 } },
++	{ 0x39, 0, 2, { 0xb3, 0x0e } },
++	{ 0x39, 0, 2, { 0xb4, 0x1b } },
++	{ 0x39, 0, 2, { 0xb5, 0x2c } },
++	{ 0x39, 0, 2, { 0xb6, 0x39 } },
++	{ 0x39, 0, 2, { 0xb7, 0x5b } },
++	{ 0x39, 0, 2, { 0xb8, 0x7c } },
++	{ 0x39, 0, 2, { 0xb9, 0xbc } },
++	{ 0x39, 0, 2, { 0xba, 0xfb } },
++	{ 0x39, 0, 2, { 0xbb, 0x75 } },
++	{ 0x39, 0, 2, { 0xbc, 0xf5 } },
++	{ 0x39, 0, 2, { 0xbd, 0xf9 } },
++	{ 0x39, 0, 2, { 0xbe, 0x7b } },
++	{ 0x39, 0, 2, { 0xbf, 0x01 } },
++	{ 0x39, 0, 2, { 0xc0, 0x45 } },
++	{ 0x39, 0, 2, { 0xc1, 0x85 } },
++	{ 0x39, 0, 2, { 0xc2, 0xa1 } },
++	{ 0x39, 0, 2, { 0xc3, 0xbf } },
++	{ 0x39, 0, 2, { 0xc4, 0xcf } },
++	{ 0x39, 0, 2, { 0xc5, 0xde } },
++	{ 0x39, 0, 2, { 0xc6, 0xee } },
++	{ 0x39, 0, 2, { 0xc7, 0xf8 } },
++	{ 0x39, 0, 2, { 0xc8, 0xfc } },
++	{ 0x39, 0, 2, { 0xc9, 0x00 } },
++	{ 0x39, 0, 2, { 0xca, 0x00 } },
++	{ 0x39, 0, 2, { 0xcb, 0x05 } },
++	{ 0x39, 0, 2, { 0xcc, 0x6f } },
++	{ 0x39, 0, 2, { 0xcd, 0xff } },
++	{ 0x39, 0, 2, { 0xce, 0xff } },
++	{ 0x39, 0, 2, { 0xb0, 0x0b } },
++	{ 0x39, 0, 2, { 0xb1, 0x00 } },
++	{ 0x39, 0, 2, { 0xb2, 0x02 } },
++	{ 0x39, 0, 2, { 0xb3, 0x13 } },
++	{ 0x39, 0, 2, { 0xb4, 0x1e } },
++	{ 0x39, 0, 2, { 0xb5, 0x2c } },
++	{ 0x39, 0, 2, { 0xb6, 0x38 } },
++	{ 0x39, 0, 2, { 0xb7, 0x5b } },
++	{ 0x39, 0, 2, { 0xb8, 0x7b } },
++	{ 0x39, 0, 2, { 0xb9, 0xba } },
++	{ 0x39, 0, 2, { 0xba, 0xf9 } },
++	{ 0x39, 0, 2, { 0xbb, 0x72 } },
++	{ 0x39, 0, 2, { 0xbc, 0xf1 } },
++	{ 0x39, 0, 2, { 0xbd, 0xf5 } },
++	{ 0x39, 0, 2, { 0xbe, 0x76 } },
++	{ 0x39, 0, 2, { 0xbf, 0xfa } },
++	{ 0x39, 0, 2, { 0xc0, 0x3d } },
++	{ 0x39, 0, 2, { 0xc1, 0x7d } },
++	{ 0x39, 0, 2, { 0xc2, 0x9a } },
++	{ 0x39, 0, 2, { 0xc3, 0xb6 } },
++	{ 0x39, 0, 2, { 0xc4, 0xc5 } },
++	{ 0x39, 0, 2, { 0xc5, 0xd5 } },
++	{ 0x39, 0, 2, { 0xc6, 0xe4 } },
++	{ 0x39, 0, 2, { 0xc7, 0xec } },
++	{ 0x39, 0, 2, { 0xc8, 0xf0 } },
++	{ 0x39, 0, 2, { 0xc9, 0x00 } },
++	{ 0x39, 0, 2, { 0xca, 0x00 } },
++	{ 0x39, 0, 2, { 0xcb, 0x05 } },
++	{ 0x39, 0, 2, { 0xcc, 0x6b } },
++	{ 0x39, 0, 2, { 0xcd, 0xff } },
++	{ 0x39, 0, 2, { 0xce, 0xff } },
++	{ 0x39, 0, 2, { 0xb0, 0x0c } },
++	{ 0x39, 0, 2, { 0xb1, 0x00 } },
++	{ 0x39, 0, 2, { 0xb2, 0x10 } },
++	{ 0x39, 0, 2, { 0xb3, 0x14 } },
++	{ 0x39, 0, 2, { 0xb4, 0x1d } },
++	{ 0x39, 0, 2, { 0xb5, 0x2b } },
++	{ 0x39, 0, 2, { 0xb6, 0x37 } },
++	{ 0x39, 0, 2, { 0xb7, 0x5a } },
++	{ 0x39, 0, 2, { 0xb8, 0x7b } },
++	{ 0x39, 0, 2, { 0xb9, 0xbb } },
++	{ 0x39, 0, 2, { 0xba, 0xfb } },
++	{ 0x39, 0, 2, { 0xbb, 0x74 } },
++	{ 0x39, 0, 2, { 0xbc, 0xf4 } },
++	{ 0x39, 0, 2, { 0xbd, 0xf8 } },
++	{ 0x39, 0, 2, { 0xbe, 0x79 } },
++	{ 0x39, 0, 2, { 0xbf, 0xfb } },
++	{ 0x39, 0, 2, { 0xc0, 0x3c } },
++	{ 0x39, 0, 2, { 0xc1, 0x7b } },
++	{ 0x39, 0, 2, { 0xc2, 0x97 } },
++	{ 0x39, 0, 2, { 0xc3, 0xb2 } },
++	{ 0x39, 0, 2, { 0xc4, 0xc0 } },
++	{ 0x39, 0, 2, { 0xc5, 0xcf } },
++	{ 0x39, 0, 2, { 0xc6, 0xdc } },
++	{ 0x39, 0, 2, { 0xc7, 0xe4 } },
++	{ 0x39, 0, 2, { 0xc8, 0xe8 } },
++	{ 0x39, 0, 2, { 0xc9, 0x00 } },
++	{ 0x39, 0, 2, { 0xca, 0x00 } },
++	{ 0x39, 0, 2, { 0xcb, 0x05 } },
++	{ 0x39, 0, 2, { 0xcc, 0x6b } },
++	{ 0x39, 0, 2, { 0xcd, 0xff } },
++	{ 0x39, 0, 2, { 0xce, 0xff } },
++	{ 0x39, 0, 2, { 0xb0, 0x06 } },
++	{ 0x39, 0, 2, { 0xc0, 0xa5 } },
++	{ 0x39, 0, 2, { 0xca, 0x09 } },
++	{ 0x39, 0, 2, { 0xc0, 0x00 } },
++	{ 0x39, 120, 2, { 0x35, 0x00 } },
++};
++
++struct t545_panel {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct regulator *supply;
++	struct gpio_desc *reset;
++	struct gpio_desc *isl_en;
++	bool prepared;
++	bool page4;	/* the HX8279 still has register page 4 (backlight PWM) selected */
++};
++
++static inline struct t545_panel *to_t545(struct drm_panel *p)
++{
++	return container_of(p, struct t545_panel, panel);
++}
++
++static const struct drm_display_mode t545_mode = {
++	.clock = 159897,
++	.hdisplay = 1200,
++	.hsync_start = 1200 + 111,
++	.hsync_end = 1200 + 111 + 10,
++	.htotal = 1200 + 111 + 10 + 40,
++	.vdisplay = 1920,
++	.vsync_start = 1920 + 16,
++	.vsync_end = 1920 + 16 + 4,
++	.vtotal = 1920 + 16 + 4 + 18,
++	.width_mm = 135,
++	.height_mm = 216,
++	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
++};
++
++static int t545_send_init(struct t545_panel *p)
++{
++	struct mipi_dsi_device *dsi = p->dsi;
++	int i, ret;
++
++	for (i = 0; i < ARRAY_SIZE(t545_init); i++) {
++		const struct t545_cmd *c = &t545_init[i];
++
++		ret = mipi_dsi_dcs_write_buffer(dsi, c->data, c->len);
++		if (ret < 0) {
++			dev_err(&dsi->dev, "init command %d failed: %d\n", i, ret);
++			return ret;
++		}
++		if (c->wait_ms)
++			msleep(c->wait_ms);
++	}
++	return 0;
++}
++
++static int t545_prepare(struct drm_panel *panel)
++{
++	struct t545_panel *p = to_t545(panel);
++
++	p->page4 = false;	/* the init sequence selects other pages */
++	struct device *dev = &p->dsi->dev;
++	int ret;
++
++	if (p->prepared)
++		return 0;
++
++	ret = regulator_enable(p->supply);
++	if (ret) {
++		dev_err(dev, "tft-vdd enable failed: %d\n", ret);
++		return ret;
++	}
++	msleep(7);
++	gpiod_set_value_cansleep(p->isl_en, 1);	/* ISL98608 AVDD/AVEE */
++	msleep(10);
++
++	gpiod_set_value_cansleep(p->reset, 1);
++	msleep(10);
++	gpiod_set_value_cansleep(p->reset, 0);
++	msleep(20);
++
++	p->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++	ret = t545_send_init(p);
++	if (ret)
++		goto err;
++
++	ret = mipi_dsi_dcs_exit_sleep_mode(p->dsi);
++	if (ret)
++		goto err;
++	msleep(120);
++
++	ret = mipi_dsi_dcs_set_display_on(p->dsi);
++	if (ret)
++		goto err;
++	msleep(20);
++
++	p->prepared = true;
++	return 0;
++err:
++	gpiod_set_value_cansleep(p->reset, 1);
++	gpiod_set_value_cansleep(p->isl_en, 0);
++	regulator_disable(p->supply);
++	return ret;
++}
++
++static int t545_unprepare(struct drm_panel *panel)
++{
++	struct t545_panel *p = to_t545(panel);
++
++	if (!p->prepared)
++		return 0;
++
++	mipi_dsi_dcs_set_display_off(p->dsi);
++	mipi_dsi_dcs_enter_sleep_mode(p->dsi);
++	msleep(120);
++	gpiod_set_value_cansleep(p->reset, 1);
++	gpiod_set_value_cansleep(p->isl_en, 0);
++	msleep(2);
++	regulator_disable(p->supply);
++	p->prepared = false;
++	return 0;
++}
++
++static int t545_get_modes(struct drm_panel *panel, struct drm_connector *connector)
++{
++	return drm_connector_helper_get_modes_fixed(connector, &t545_mode);
++}
++
++static const struct drm_panel_funcs t545_funcs = {
++	.prepare = t545_prepare,
++	.unprepare = t545_unprepare,
++	.get_modes = t545_get_modes,
++};
++
++static int t545_bl_update(struct backlight_device *bl)
++{
++	/* the stock driver controls the backlight PWM of the HX8279 with page 4, register 0xb8 */
++	struct mipi_dsi_device *dsi = bl_get_data(bl);
++	struct t545_panel *p = mipi_dsi_get_drvdata(dsi);
++	const u8 page4[] = { 0xb0, 0x04 };
++	u8 pwm[] = { 0xb8, backlight_get_brightness(bl) };
++	int ret = 0;
++
++	/*
++	 * Each DCS command costs ~33 ms in video mode: select page 4 only once after the init sequence, so that a brightness
++	 * change is one command (the framework animates the slider; two commands per step made it visibly stepped).
++	 */
++	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	if (!p->page4) {
++		ret = mipi_dsi_dcs_write_buffer(dsi, page4, sizeof(page4));
++		p->page4 = ret >= 0;
++	}
++	if (ret >= 0)
++		ret = mipi_dsi_dcs_write_buffer(dsi, pwm, sizeof(pwm));
++	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++	return ret < 0 ? ret : 0;
++}
++
++static const struct backlight_ops t545_bl_ops = {
++	.update_status = t545_bl_update,
++};
++
++static int t545_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.brightness = 160,
++		.max_brightness = 255,
++	};
++	struct backlight_device *bl;
++	struct t545_panel *p;
++	int ret;
++
++	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++
++	p->supply = devm_regulator_get(dev, "power");
++	if (IS_ERR(p->supply))
++		return dev_err_probe(dev, PTR_ERR(p->supply), "power supply\n");
++	p->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(p->reset))
++		return dev_err_probe(dev, PTR_ERR(p->reset), "reset gpio\n");
++	p->isl_en = devm_gpiod_get(dev, "isl-enable", GPIOD_OUT_LOW);
++	if (IS_ERR(p->isl_en))
++		return dev_err_probe(dev, PTR_ERR(p->isl_en), "isl-enable gpio\n");
++
++	p->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, p);
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST | MIPI_DSI_MODE_LPM;
++
++	drm_panel_init(&p->panel, dev, &t545_funcs, DRM_MODE_CONNECTOR_DSI);
++	p->panel.prepare_prev_first = true;	/* the init commands need the DSI link up */
++	/* "panel": the stock lights HAL (vendor.samsung.hardware.light-service) writes /sys/class/backlight/panel/brightness */
++	bl = devm_backlight_device_register(dev, "panel", dev, dsi, &t545_bl_ops, &props);
++	if (IS_ERR(bl))
++		return PTR_ERR(bl);
++	p->panel.backlight = bl;
++	drm_panel_add(&p->panel);
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		drm_panel_remove(&p->panel);
++		return dev_err_probe(dev, ret, "dsi attach\n");
++	}
++	return 0;
++}
++
++static void t545_remove(struct mipi_dsi_device *dsi)
++{
++	struct t545_panel *p = mipi_dsi_get_drvdata(dsi);
++
++	mipi_dsi_detach(dsi);
++	drm_panel_remove(&p->panel);
++}
++
++static const struct of_device_id t545_of_match[] = {
++	{ .compatible = "samsung,sm-t545-hx8279" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, t545_of_match);
++
++static struct mipi_dsi_driver t545_driver = {
++	.probe = t545_probe,
++	.remove = t545_remove,
++	.driver = {
++		.name = "panel-t545-hx8279",
++		.of_match_table = t545_of_match,
++	},
++};
++module_mipi_dsi_driver(t545_driver);
++
++MODULE_DESCRIPTION("SM-T545 BOE TV101WUM (Himax HX8279) panel driver");
++MODULE_LICENSE("GPL");
+-- 
+2.47.3
+

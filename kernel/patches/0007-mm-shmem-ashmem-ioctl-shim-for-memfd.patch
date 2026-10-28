@@ -1,0 +1,63 @@
+From 86d4802eed86c4e79b2ce1b7bce3301a99c84152 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:52 +0200
+Subject: [PATCH 07/14] mm: shmem: ashmem ioctl shim for memfd
+
+libcutils checks that a memfd answers ASHMEM_GET_SIZE before it uses memfd instead of /dev/ashmem. Minimal shim: size, name and protection are kept by memfd, pinning is a no-op.
+---
+ mm/shmem.c | 38 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/mm/shmem.c b/mm/shmem.c
+index 79af5f9f8..dd0454081 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -5235,7 +5235,45 @@ static const struct address_space_operations shmem_aops = {
+ 	.error_remove_folio = shmem_error_remove_folio,
+ };
+ 
++/*
++ * SM-T545 bring-up: Android's libcutils checks that a memfd answers the ashmem ioctls (ASHMEM_GET_SIZE) before it uses memfd instead of
++ * /dev/ashmem, and upstream has no ashmem. Minimal shim in the spirit of the Android common kernel's memfd/ashmem shim: size, name and
++ * protection are kept by memfd itself (ftruncate, seals), pinning is a no-op (nothing is ever purged).
++ */
++static long t545_ashmem_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	if (_IOC_TYPE(cmd) != 0x77)
++		return -ENOTTY;
++
++	switch (_IOC_NR(cmd)) {
++	case 1:		/* SET_NAME */
++	case 3:		/* SET_SIZE */
++	case 5:		/* SET_PROT_MASK */
++	case 7:		/* PIN */
++	case 8:		/* UNPIN */
++	case 10:	/* PURGE_ALL_CACHES */
++		return 0;
++	case 2:		/* GET_NAME */
++		if (arg && copy_to_user((void __user *)arg, "", 1))
++			return -EFAULT;
++		return 0;
++	case 4:		/* GET_SIZE */
++		return i_size_read(file_inode(file));
++	case 6:		/* GET_PROT_MASK */
++		return PROT_READ | PROT_WRITE | PROT_EXEC;
++	case 9:		/* GET_PIN_STATUS */
++		return 1;	/* ASHMEM_IS_PINNED */
++	case 11:	/* GET_FILE_ID */
++		if (put_user(file_inode(file)->i_ino, (unsigned long __user *)arg))
++			return -EFAULT;
++		return 0;
++	}
++	return -ENOTTY;
++}
++
+ static const struct file_operations shmem_file_operations = {
++	.unlocked_ioctl	= t545_ashmem_ioctl,
++	.compat_ioctl	= t545_ashmem_ioctl,
+ 	.mmap_prepare	= shmem_mmap_prepare,
+ 	.open		= shmem_file_open,
+ 	.get_unmapped_area = shmem_get_unmapped_area,
+-- 
+2.47.3
+

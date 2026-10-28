@@ -1,0 +1,25 @@
+From 7e6dcfc5f7d04672f0a1e23ceb87790fa4415c1b Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:51 +0200
+Subject: [PATCH 02/14] clk: qcom: gcc-sdm845: add the SDCC1 block reset
+
+After the Samsung bootloader and Android the SDCC1 registers ignore writes until GCC_SDCC1_BCR is toggled; sdhci-msm does that through the reset line this adds.
+---
+ drivers/clk/qcom/gcc-sdm845.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/clk/qcom/gcc-sdm845.c b/drivers/clk/qcom/gcc-sdm845.c
+index 6d0f9cede..2ca05b40f 100644
+--- a/drivers/clk/qcom/gcc-sdm845.c
++++ b/drivers/clk/qcom/gcc-sdm845.c
+@@ -3877,6 +3877,7 @@ static const struct qcom_reset_map gcc_sdm845_resets[] = {
+ 	[GCC_QUSB2PHY_SEC_BCR] = { 0x12004 },
+ 	[GCC_SDCC2_BCR] = { 0x14000 },
+ 	[GCC_SDCC4_BCR] = { 0x16000 },
++	[GCC_SDCC1_BCR] = { 0x26000 },
+ 	[GCC_TSIF_BCR] = { 0x36000 },
+ 	[GCC_UFS_CARD_BCR] = { 0x75000 },
+ 	[GCC_UFS_PHY_BCR] = { 0x77000 },
+-- 
+2.47.3
+

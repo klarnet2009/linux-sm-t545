@@ -1,0 +1,617 @@
+From f848159e108efd4d295871c2c30c7a549931c472 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:53 +0200
+Subject: [PATCH 12/14] ASoC: SM-T545 sound: msm8916 wcd codec changes and
+ sdm845 machine driver
+
+Internal microphone and speaker paths: two CS35L41 amplifiers on the secondary MI2S, LPI pins written after the bit clock runs, analog/digital codec changes for the PM660L.
+---
+ sound/soc/codecs/msm8916-wcd-analog.c  | 131 ++++++++++++++++++++--
+ sound/soc/codecs/msm8916-wcd-digital.c |  91 +++++++++++++--
+ sound/soc/qcom/sdm845.c                | 148 ++++++++++++++++++++++++-
+ 3 files changed, 351 insertions(+), 19 deletions(-)
+
+diff --git a/sound/soc/codecs/msm8916-wcd-analog.c b/sound/soc/codecs/msm8916-wcd-analog.c
+index 6fe111e6d..a8294a819 100644
+--- a/sound/soc/codecs/msm8916-wcd-analog.c
++++ b/sound/soc/codecs/msm8916-wcd-analog.c
+@@ -70,6 +70,7 @@
+ #define CDC_D_CDC_CONN_RX2_CTL		(0xf054)
+ #define CDC_D_CDC_CONN_RX3_CTL		(0xf055)
+ #define CDC_D_CDC_CONN_RX_LB_CTL	(0xf056)
++#define CDC_D_CDC_RX_DELAY_CTL		(0xf057)
+ #define CDC_D_SEC_ACCESS		(0xf0D0)
+ #define CDC_D_PERPH_RESET_CTL3		(0xf0DA)
+ #define CDC_D_PERPH_RESET_CTL4		(0xf0DB)
+@@ -234,7 +235,9 @@
+ #define RX_EAR_CTL_PA_SEL_MASK			BIT(7)
+ #define RX_EAR_CTL_PA_SEL			BIT(7)
+ 
++#define CDC_A_RX_EAR_STATUS		(0xf1A1)
+ #define CDC_A_SPKR_DAC_CTL		(0xf1B0)
++#define CDC_A_SPKR_ANA_BIAS_SET		(0xf1B3)
+ #define SPKR_DAC_CTL_DAC_RESET_MASK	BIT(4)
+ #define SPKR_DAC_CTL_DAC_RESET_NORMAL	0
+ 
+@@ -266,6 +269,7 @@
+ 
+ #define CDC_A_SPKR_DRV_DBG		(0xf1B7)
+ #define CDC_A_CURRENT_LIMIT		(0xf1C0)
++#define CDC_A_BYPASS_MODE		(0xf1C2)
+ #define CDC_A_BOOST_EN_CTL		(0xf1C3)
+ #define CDC_A_SLOPE_COMP_IP_ZERO	(0xf1C4)
+ #define CDC_A_SEC_ACCESS		(0xf1D0)
+@@ -308,6 +312,8 @@ struct pm8916_wcd_analog_priv {
+ 	unsigned int micbias1_cap_mode;
+ 	unsigned int micbias2_cap_mode;
+ 	unsigned int micbias_mv;
++	/* SDM660/SDM670 PM660L codec (DIANGU/DRAX): vendor msm-analog-cdc.c headphone sequences differ from PM8916 */
++	bool pm660l;
+ };
+ 
+ static const char *const adc2_mux_text[] = { "ZERO", "INP2", "INP3" };
+@@ -715,6 +721,11 @@ static int pm8916_wcd_analog_enable_hphl_pa(struct snd_soc_dapm_widget *w,
+ 		snd_soc_component_update_bits(component, CDC_A_RX_HPH_L_TEST,
+ 				0x04, 0x04);
+ 		break;
++	case SND_SOC_DAPM_PRE_PMD:
++		/* vendor (>= CAJON): park the click-and-pop bias before the PA is switched off */
++		if (priv->pm660l)
++			snd_soc_component_update_bits(component, CDC_A_RX_HPH_BIAS_CNP, 0xF0, 0x30);
++		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+ 		/* wait 20 ms after the digital codec has powered down */
+ 		msleep(20);
+@@ -742,6 +753,11 @@ static int pm8916_wcd_analog_enable_hphr_pa(struct snd_soc_dapm_widget *w,
+ 		snd_soc_component_update_bits(component, CDC_A_RX_HPH_R_TEST,
+ 				0x04, 0x04);
+ 		break;
++	case SND_SOC_DAPM_PRE_PMD:
++		/* vendor (>= CAJON): park the click-and-pop bias before the PA is switched off */
++		if (priv->pm660l)
++			snd_soc_component_update_bits(component, CDC_A_RX_HPH_BIAS_CNP, 0xF0, 0x30);
++		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+ 		msleep(20);
+ 		snd_soc_component_update_bits(component, CDC_A_RX_HPH_R_TEST,
+@@ -751,6 +767,53 @@ static int pm8916_wcd_analog_enable_hphr_pa(struct snd_soc_dapm_widget *w,
+ 	return 0;
+ }
+ 
++static int pm8916_wcd_analog_enable_ncp_clk(struct snd_soc_dapm_widget *w,
++					    struct snd_kcontrol *kcontrol,
++					    int event)
++{
++	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
++	struct pm8916_wcd_analog_priv *priv = dev_get_drvdata(component->dev);
++
++	/* the vendor driver never sets NCP_CLK_EN on DIANGU/DRAX (it only sets the PDM clock bit), so leave it alone */
++	if (priv->pm660l)
++		return 0;
++
++	snd_soc_component_update_bits(component, CDC_D_CDC_DIG_CLK_CTL,
++				      DIG_CLK_CTL_NCP_CLK_EN_MASK,
++				      event == SND_SOC_DAPM_PRE_PMU ? DIG_CLK_CTL_NCP_CLK_EN : 0);
++	return 0;
++}
++
++static int pm8916_wcd_analog_enable_hph_dac(struct snd_soc_dapm_widget *w,
++					    struct snd_kcontrol *kcontrol,
++					    int event)
++{
++	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
++	struct pm8916_wcd_analog_priv *priv = dev_get_drvdata(component->dev);
++
++	if (!priv->pm660l)
++		return 0;
++
++	switch (event) {
++	case SND_SOC_DAPM_PRE_PMU:
++		/* vendor: 2 ms against a wrong PA state after a quick HPH disable/enable */
++		usleep_range(2000, 2100);
++		if (w->reg == CDC_A_RX_HPH_L_PA_DAC_CTL) {
++			/* vendor (> CAJON): pulse CNP_EN bit 3 before the left DAC comes up */
++			snd_soc_component_update_bits(component, CDC_A_RX_HPH_CNP_EN, BIT(3), BIT(3));
++			snd_soc_component_update_bits(component, CDC_A_RX_HPH_CNP_EN, BIT(3), 0);
++		}
++		/* hold the DAC data path in reset while the DAC (bit 3, written by DAPM next) powers up */
++		snd_soc_component_update_bits(component, w->reg, RX_HPH_R_PA_DAC_CTL_DATA_RESET_MASK,
++					      RX_HPH_R_PA_DAC_CTL_DATA_RESET);
++		break;
++	case SND_SOC_DAPM_POST_PMU:
++		snd_soc_component_update_bits(component, w->reg, RX_HPH_R_PA_DAC_CTL_DATA_RESET_MASK, 0);
++		break;
++	}
++	return 0;
++}
++
+ static const struct reg_default wcd_reg_defaults_2_0[] = {
+ 	{CDC_A_RX_COM_OCP_CTL, 0xD1},
+ 	{CDC_A_RX_COM_OCP_COUNT, 0xFF},
+@@ -770,9 +833,46 @@ static const struct reg_default wcd_reg_defaults_2_0[] = {
+ 	{CDC_A_MASTER_BIAS_CTL, 0x30},
+ };
+ 
++/* PM660L (DRAX/DIANGU): vendor msm-analog-cdc.c bringup, cajon2p0_wcd_reg_defaults and codec_init_reg */
++static const struct reg_default wcd_reg_defaults_pm660l[] = {
++	/* release the peripheral reset written above; PERPH_RESET_CTL4 only takes a write right after SEC_ACCESS */
++	{CDC_D_SEC_ACCESS, 0xA5},
++	{CDC_D_PERPH_RESET_CTL4, 0x00},
++	{CDC_A_SEC_ACCESS, 0xA5},
++	{CDC_A_PERPH_RESET_CTL4, 0x00},
++	{CDC_D_SEC_ACCESS, 0xA5},
++	{CDC_D_PERPH_RESET_CTL3, 0x0F},
++	{CDC_A_SEC_ACCESS, 0xA5},
++	{CDC_A_PERPH_RESET_CTL3, 0x0F},
++	{CDC_A_TX_1_2_OPAMP_BIAS, 0x4C},
++	{CDC_A_CURRENT_LIMIT, 0xA2},
++	{CDC_A_NCP_FBCTRL, 0xA8},
++	{CDC_A_NCP_VCTRL, 0xA4},
++	{CDC_A_SPKR_ANA_BIAS_SET, 0x41},
++	{CDC_A_SPKR_DRV_CTL, 0x69},
++	{CDC_A_SPKR_DRV_DBG, 0x01},
++	{CDC_A_SPKR_OCP_CTL, 0xE1},
++	{CDC_A_SPKR_DAC_CTL, 0x03},
++	{CDC_A_RX_EAR_STATUS, 0x10},
++	{CDC_A_BYPASS_MODE, 0x18},
++	{CDC_A_RX_HPH_BIAS_PA, 0xFA},
++	{CDC_D_CDC_RX_DELAY_CTL, 0x66},
++	{CDC_A_RX_COM_OCP_CTL, 0x12},
++	{CDC_A_RX_COM_OCP_COUNT, 0xFF},
++	{CDC_A_MASTER_BIAS_CTL, 0x30},
++	/*
++	 * shortcut: SM-T545 board mic wiring (vendor micbias_put, CONFIG_SEC_GTACTIVEXL_PROJECT): TX1N/TX2N off the
++	 * micbias pull-up (bits 6/3 cleared, 5/2 set from POR 0x49) and the TX3 ground select; move to DT for a second board
++	 */
++	{CDC_A_MICB_1_INT_RBIAS, 0x25},
++	{CDC_A_MICB_1_EN, 0x01},
++};
++
+ static int pm8916_wcd_analog_probe(struct snd_soc_component *component)
+ {
+ 	struct pm8916_wcd_analog_priv *priv = dev_get_drvdata(component->dev);
++	const struct reg_default *defs = wcd_reg_defaults_2_0;
++	int ndefs = ARRAY_SIZE(wcd_reg_defaults_2_0);
+ 	int err, reg;
+ 
+ 	err = regulator_bulk_enable(ARRAY_SIZE(priv->supplies), priv->supplies);
+@@ -793,9 +893,13 @@ static int pm8916_wcd_analog_probe(struct snd_soc_component *component)
+ 	snd_soc_component_write(component, CDC_D_PERPH_RESET_CTL4, 0x01);
+ 	snd_soc_component_write(component, CDC_A_PERPH_RESET_CTL4, 0x01);
+ 
+-	for (reg = 0; reg < ARRAY_SIZE(wcd_reg_defaults_2_0); reg++)
+-		snd_soc_component_write(component, wcd_reg_defaults_2_0[reg].reg,
+-			      wcd_reg_defaults_2_0[reg].def);
++	if (priv->pm660l) {
++		defs = wcd_reg_defaults_pm660l;
++		ndefs = ARRAY_SIZE(wcd_reg_defaults_pm660l);
++	}
++
++	for (reg = 0; reg < ndefs; reg++)
++		snd_soc_component_write(component, defs[reg].reg, defs[reg].def);
+ 
+ 	priv->component = component;
+ 
+@@ -940,16 +1044,20 @@ static const struct snd_soc_dapm_widget pm8916_wcd_analog_dapm_widgets[] = {
+ 
+ 	SND_SOC_DAPM_PGA_E("HPHL PA", CDC_A_RX_HPH_CNP_EN, 5, 0, NULL, 0,
+ 			   pm8916_wcd_analog_enable_hphl_pa,
+-			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
++			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD |
++			   SND_SOC_DAPM_POST_PMD),
+ 	SND_SOC_DAPM_MUX("HPHL", SND_SOC_NOPM, 0, 0, &hphl_mux),
+-	SND_SOC_DAPM_MIXER("HPHL DAC", CDC_A_RX_HPH_L_PA_DAC_CTL, 3, 0, NULL,
+-			   0),
++	SND_SOC_DAPM_MIXER_E("HPHL DAC", CDC_A_RX_HPH_L_PA_DAC_CTL, 3, 0, NULL, 0,
++			     pm8916_wcd_analog_enable_hph_dac,
++			     SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
+ 	SND_SOC_DAPM_PGA_E("HPHR PA", CDC_A_RX_HPH_CNP_EN, 4, 0, NULL, 0,
+ 			   pm8916_wcd_analog_enable_hphr_pa,
+-			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
++			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD |
++			   SND_SOC_DAPM_POST_PMD),
+ 	SND_SOC_DAPM_MUX("HPHR", SND_SOC_NOPM, 0, 0, &hphr_mux),
+-	SND_SOC_DAPM_MIXER("HPHR DAC", CDC_A_RX_HPH_R_PA_DAC_CTL, 3, 0, NULL,
+-			   0),
++	SND_SOC_DAPM_MIXER_E("HPHR DAC", CDC_A_RX_HPH_R_PA_DAC_CTL, 3, 0, NULL, 0,
++			     pm8916_wcd_analog_enable_hph_dac,
++			     SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
+ 	SND_SOC_DAPM_MIXER("SPK DAC", SND_SOC_NOPM, 0, 0,
+ 			   spkr_switch, ARRAY_SIZE(spkr_switch)),
+ 
+@@ -1022,7 +1130,9 @@ static const struct snd_soc_dapm_widget pm8916_wcd_analog_dapm_widgets[] = {
+ 	SND_SOC_DAPM_SUPPLY("RXD3_CLK", CDC_D_CDC_DIG_CLK_CTL, 2, 0, NULL, 0),
+ 
+ 	SND_SOC_DAPM_SUPPLY("TXD_CLK", CDC_D_CDC_DIG_CLK_CTL, 4, 0, NULL, 0),
+-	SND_SOC_DAPM_SUPPLY("NCP_CLK", CDC_D_CDC_DIG_CLK_CTL, 6, 0, NULL, 0),
++	SND_SOC_DAPM_SUPPLY("NCP_CLK", SND_SOC_NOPM, 0, 0,
++			    pm8916_wcd_analog_enable_ncp_clk,
++			    SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+ 	SND_SOC_DAPM_SUPPLY("RXD_PDM_CLK", CDC_D_CDC_DIG_CLK_CTL, 7, 0, NULL,
+ 			    0),
+ 
+@@ -1310,6 +1420,7 @@ static int pm8916_wcd_analog_spmi_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
++	priv->pm660l = of_device_is_compatible(dev->of_node, "qcom,pm660l-wcd-analog-codec");
+ 	dev_set_drvdata(dev, priv);
+ 
+ 	return devm_snd_soc_register_component(dev, &pm8916_wcd_analog,
+diff --git a/sound/soc/codecs/msm8916-wcd-digital.c b/sound/soc/codecs/msm8916-wcd-digital.c
+index cfadea2aa..ae31b5648 100644
+--- a/sound/soc/codecs/msm8916-wcd-digital.c
++++ b/sound/soc/codecs/msm8916-wcd-digital.c
+@@ -226,6 +226,27 @@ struct wcd_iir_filter_ctl {
+ 
+ struct msm8916_wcd_digital_priv {
+ 	struct clk *ahbclk, *mclk;
++	struct regmap *map;
++	/*
++	 * SDM660/SDM670: the codec sits in the ADSP-owned LPASS, mclk is the AFE INT_MCLK_0 clock and the registers only
++	 * answer while it runs, so the regmap stays cache-only and mclk is switched with the "MCLK" DAPM supply.
++	 */
++	bool mclk_on_demand;
++};
++
++/* SDM660 POR values (vendor sdm660-cdc-registers.h) of the registers this driver uses that do not reset to 0 */
++static const struct reg_default sdm660_nonzero_por[] = {
++	{ LPASS_CDC_CLK_RX_I2S_CTL, 0x13 },
++	{ LPASS_CDC_CLK_TX_I2S_CTL, 0x13 },
++	{ LPASS_CDC_CLK_OTHR_CTL, 0x04 },
++	{ LPASS_CDC_RX1_B5_CTL, 0x68 },
++	{ LPASS_CDC_RX2_B5_CTL, 0x68 },
++	{ LPASS_CDC_RX3_B5_CTL, 0x68 },
++	{ LPASS_CDC_TOP_CTL, 0x01 },
++	{ LPASS_CDC_IIR1_CTL, 0x40 },
++	{ LPASS_CDC_IIR2_CTL, 0x40 },
++	{ LPASS_CDC_TX1_CLK_FS_CTL, 0x03 },
++	{ LPASS_CDC_TX2_CLK_FS_CTL, 0x03 },
+ };
+ 
+ static const unsigned long rx_gain_reg[] = {
+@@ -700,6 +721,35 @@ static int msm8916_wcd_digital_enable_dmic(struct snd_soc_dapm_widget *w,
+ 	return 0;
+ }
+ 
++static int msm8916_wcd_digital_enable_mclk(struct snd_soc_dapm_widget *w,
++					   struct snd_kcontrol *kcontrol,
++					   int event)
++{
++	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
++	struct msm8916_wcd_digital_priv *priv = snd_soc_component_get_drvdata(component);
++	int ret;
++
++	if (!priv->mclk_on_demand)
++		return 0;
++
++	switch (event) {
++	case SND_SOC_DAPM_PRE_PMU:
++		ret = clk_prepare_enable(priv->mclk);
++		if (ret)
++			return ret;
++		regcache_cache_only(priv->map, false);
++		/* shortcut: only non-POR values are synced; if LPASS keeps state, a register reset to POR while idle is missed */
++		regcache_mark_dirty(priv->map);
++		return regcache_sync(priv->map);
++	case SND_SOC_DAPM_POST_PMD:
++		regcache_cache_only(priv->map, true);
++		clk_disable_unprepare(priv->mclk);
++		break;
++	}
++
++	return 0;
++}
++
+ static const char * const iir_inp1_text[] = {
+ 	"ZERO", "DEC1", "DEC2", "RX1", "RX2", "RX3"
+ };
+@@ -800,7 +850,10 @@ static const struct snd_soc_dapm_widget msm8916_wcd_digital_dapm_widgets[] = {
+ 	SND_SOC_DAPM_SUPPLY("TX_I2S_CLK", LPASS_CDC_CLK_TX_I2S_CTL, 4, 0,
+ 			    NULL, 0),
+ 
+-	SND_SOC_DAPM_SUPPLY("MCLK", SND_SOC_NOPM, 0, 0, NULL, 0),
++	/* first supply up, last down: every register write of the other widgets needs it on SDM660 */
++	SND_SOC_DAPM_SUPPLY_S("MCLK", -3, SND_SOC_NOPM, 0, 0,
++			      msm8916_wcd_digital_enable_mclk,
++			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+ 	SND_SOC_DAPM_SUPPLY("PDM_CLK", LPASS_CDC_CLK_PDM_CTL, 0, 0, NULL, 0),
+ 	/* Connectivity Clock */
+ 	SND_SOC_DAPM_SUPPLY_S("CDC_CONN", -2, LPASS_CDC_CLK_OTHR_CTL, 2, 0,
+@@ -824,7 +877,8 @@ static int msm8916_wcd_digital_get_clks(struct platform_device *pdev,
+ {
+ 	struct device *dev = &pdev->dev;
+ 
+-	priv->ahbclk = devm_clk_get(dev, "ahbix-clk");
++	/* SDM660/SDM670 have no AHB clock under Linux control */
++	priv->ahbclk = devm_clk_get_optional(dev, "ahbix-clk");
+ 	if (IS_ERR(priv->ahbclk)) {
+ 		dev_err(dev, "failed to get ahbix clk\n");
+ 		return PTR_ERR(priv->ahbclk);
+@@ -1165,6 +1219,7 @@ static const struct regmap_config msm8916_codec_regmap_config = {
+ 
+ static int msm8916_wcd_digital_probe(struct platform_device *pdev)
+ {
++	struct regmap_config cfg = msm8916_codec_regmap_config;
+ 	struct msm8916_wcd_digital_priv *priv;
+ 	struct device *dev = &pdev->dev;
+ 	void __iomem *base;
+@@ -1179,11 +1234,26 @@ static int msm8916_wcd_digital_probe(struct platform_device *pdev)
+ 	if (IS_ERR(base))
+ 		return PTR_ERR(base);
+ 
+-	digital_map =
+-	    devm_regmap_init_mmio(&pdev->dev, base,
+-				  &msm8916_codec_regmap_config);
++	priv->mclk_on_demand = of_device_is_compatible(dev->of_node, "qcom,sdm660-wcd-digital-codec");
++	if (priv->mclk_on_demand) {
++		/* the cache must hold every register from the start: nothing can be read back before mclk runs */
++		unsigned int i, n = cfg.max_register / cfg.reg_stride + 1;
++		struct reg_default *def = devm_kcalloc(dev, n, sizeof(*def), GFP_KERNEL);
++
++		if (!def)
++			return -ENOMEM;
++		for (i = 0; i < n; i++)
++			def[i].reg = i * cfg.reg_stride;
++		for (i = 0; i < ARRAY_SIZE(sdm660_nonzero_por); i++)
++			def[sdm660_nonzero_por[i].reg / cfg.reg_stride].def = sdm660_nonzero_por[i].def;
++		cfg.reg_defaults = def;
++		cfg.num_reg_defaults = n;
++	}
++
++	digital_map = devm_regmap_init_mmio(&pdev->dev, base, &cfg);
+ 	if (IS_ERR(digital_map))
+ 		return PTR_ERR(digital_map);
++	priv->map = digital_map;
+ 
+ 	ret = msm8916_wcd_digital_get_clks(pdev, priv);
+ 	if (ret < 0)
+@@ -1195,7 +1265,10 @@ static int msm8916_wcd_digital_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
+-	ret = clk_prepare_enable(priv->mclk);
++	if (priv->mclk_on_demand)
++		regcache_cache_only(digital_map, true);
++	else
++		ret = clk_prepare_enable(priv->mclk);
+ 	if (ret < 0) {
+ 		dev_err(dev, "failed to enable mclk %d\n", ret);
+ 		goto err_clk;
+@@ -1212,7 +1285,8 @@ static int msm8916_wcd_digital_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ err_mclk:
+-	clk_disable_unprepare(priv->mclk);
++	if (!priv->mclk_on_demand)
++		clk_disable_unprepare(priv->mclk);
+ err_clk:
+ 	clk_disable_unprepare(priv->ahbclk);
+ 	return ret;
+@@ -1222,7 +1296,8 @@ static void msm8916_wcd_digital_remove(struct platform_device *pdev)
+ {
+ 	struct msm8916_wcd_digital_priv *priv = dev_get_drvdata(&pdev->dev);
+ 
+-	clk_disable_unprepare(priv->mclk);
++	if (!priv->mclk_on_demand)
++		clk_disable_unprepare(priv->mclk);
+ 	clk_disable_unprepare(priv->ahbclk);
+ }
+ 
+diff --git a/sound/soc/qcom/sdm845.c b/sound/soc/qcom/sdm845.c
+index 0ce9dff4d..6e830324d 100644
+--- a/sound/soc/qcom/sdm845.c
++++ b/sound/soc/qcom/sdm845.c
+@@ -4,6 +4,8 @@
+  */
+ 
+ #include <dt-bindings/sound/qcom,q6afe.h>
++#include <linux/gpio/consumer.h>
++#include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <sound/core.h>
+@@ -40,8 +42,32 @@ struct sdm845_snd_data {
+ 	uint32_t pri_mi2s_clk_count;
+ 	uint32_t sec_mi2s_clk_count;
+ 	uint32_t quat_tdm_clk_count;
++	struct snd_soc_jack_gpio earjack_gpios[2];
++	int num_earjack_gpios;
+ };
+ 
++/*
++ * SM-T545 GPIO jack: the media key line reads active without a plug (it is not driven), so the button is only reported while a plug is in,
++ * and a removal releases it.
++ */
++static int sdm845_earjack_det_check(void *data)
++{
++	struct sdm845_snd_data *pdata = data;
++	bool plug = gpiod_get_value_cansleep(pdata->earjack_gpios[0].desc);
++
++	if (!plug)
++		snd_soc_jack_report(&pdata->jack, 0, SND_JACK_BTN_0);
++	return plug ? SND_JACK_HEADPHONE : 0;
++}
++
++static int sdm845_earjack_key_check(void *data)
++{
++	struct sdm845_snd_data *pdata = data;
++	struct gpio_desc *key = pdata->earjack_gpios[pdata->num_earjack_gpios - 1].desc;
++
++	return (pdata->jack.status & SND_JACK_HEADPHONE) && gpiod_get_value_cansleep(key) ? SND_JACK_BTN_0 : 0;
++}
++
+ static struct snd_soc_jack_pin sdm845_jack_pins[] = {
+ 	{
+ 		.pin = "Headphone Jack",
+@@ -211,8 +237,30 @@ static int sdm845_snd_hw_params(struct snd_pcm_substream *substream,
+ 		ret = sdm845_slim_snd_hw_params(substream, params);
+ 		break;
+ 	case QUATERNARY_MI2S_RX:
+-	case SECONDARY_MI2S_RX:
++	case INT0_MI2S_RX:
++	case INT3_MI2S_TX:
+ 		break;
++	case SECONDARY_MI2S_RX: {
++		/* SM-T545: two CS35L41 run their PLL from SCLK; tell them its rate (the cpu side uses MI2S_BCLK_RATE) */
++		int i;
++
++		for_each_rtd_codec_dais(rtd, i, codec_dai) {
++			ret = snd_soc_component_set_sysclk(codec_dai->component, 0 /* CS35L41_CLKID_SCLK */, 0,
++							   MI2S_BCLK_RATE, SND_SOC_CLOCK_IN);
++			if (!ret)
++				ret = snd_soc_dai_set_sysclk(codec_dai, 0, MI2S_BCLK_RATE, SND_SOC_CLOCK_IN);
++			if (!ret) {
++				/* both amps default to ASP slot 0 (left): the right one ("SpkR") takes slot 1 */
++				const char *pfx = codec_dai->component->name_prefix;
++				unsigned int slot = pfx && !strcmp(pfx, "SpkR");
++
++				ret = snd_soc_dai_set_channel_map(codec_dai, 0, NULL, 1, &slot);
++			}
++			if (ret < 0)
++				dev_err(rtd->dev, "cs35l41 sysclk: %d\n", ret);
++		}
++		break;
++	}
+ 	default:
+ 		pr_err("%s: invalid dai id 0x%x\n", __func__, cpu_dai->id);
+ 		break;
+@@ -288,6 +336,31 @@ static int sdm845_dai_init(struct snd_soc_pcm_runtime *rtd)
+ 			return rval;
+ 		}
+ 		break;
++	case INT0_MI2S_RX:
++		/* SM-T545 headset: stock detects the plug with a TLMM switch GPIO and a media key GPIO (sec_jack), not with MBHC */
++		if (pdata->num_earjack_gpios) {
++			rval = snd_soc_jack_add_gpios(&pdata->jack, pdata->num_earjack_gpios,
++						      pdata->earjack_gpios);
++			if (rval) {
++				dev_warn(card->dev, "Failed to add earjack gpios: %d\n", rval);
++				return rval;
++			}
++			break;
++		}
++		/* otherwise the PM660L analog codec detects the plug (MBHC); the LPASS digital codec has no jack */
++		for_each_rtd_codec_dais(rtd, i, codec_dai) {
++			rval = snd_soc_component_set_jack(codec_dai->component,
++							  &pdata->jack, NULL);
++			if (rval == -ENOTSUPP)
++				continue;
++			if (rval) {
++				dev_warn(card->dev, "Failed to set jack: %d\n", rval);
++				return rval;
++			}
++			pdata->jack.jack->private_data = codec_dai->component;
++			pdata->jack.jack->private_free = sdm845_jack_free;
++		}
++		break;
+ 	case SLIMBUS_0_RX...SLIMBUS_6_TX:
+ 		/* setting up wcd multiple times for slim port is redundant */
+ 		if (pdata->slim_port_setup || !link->no_pcm)
+@@ -325,6 +398,38 @@ static int sdm845_dai_init(struct snd_soc_pcm_runtime *rtd)
+ }
+ 
+ 
++
++/*
++ * SM-T545: the speaker MI2S (secondary, to two CS35L41) uses LPASS LPI pins gpio8 clk, gpio9 ws, gpio10/11 data. The LPI TLMM only
++ * answers while the ADSP runs an LPASS clock (the stock SDM670 ADSP has no LPASS HW vote, and the mainline LPI pinctrl driver hangs the
++ * SoC when it probes at boot), so, like Samsung's machine driver, set the pin functions right after the MI2S bit clock was enabled.
++ */
++#define T545_LPI_TLMM_BASE	0x62b40000
++#define T545_LPI_TLMM_SIZE	0x20000
++
++/* cfg[i] = function << 2 | (mA / 2 - 1) << 6 for LPI gpio (first + i) */
++static void t545_lpi_pins(struct device *dev, unsigned int first, const u32 *cfg, unsigned int n)
++{
++	void __iomem *base = ioremap(T545_LPI_TLMM_BASE, T545_LPI_TLMM_SIZE);
++	unsigned int i;
++
++	if (!base)
++		return;
++	for (i = 0; i < n; i++) {
++		writel(cfg[i], base + (first + i) * 0x1000);
++		dev_info(dev, "t545: LPI gpio%u = %#x\n", first + i, readl(base + (first + i) * 0x1000));
++	}
++	iounmap(base);
++}
++
++/* 8 mA: i2s1_clk/i2s1_ws are function 3, i2s1_data is function 4 on gpio10 and 2 on gpio11 */
++static const u32 t545_sec_mi2s_pins[] = { 0xcc, 0xcc, 0xd0, 0xc8 };
++/* PDM link to the PM660L codec (stock cdc_pdm_*_active): gpio18 clk func2 4 mA, gpio19 sync func3 4 mA, gpio20 tx func2 8 mA */
++static const u32 t545_pdm_tx_pins[] = { 0x48, 0x4c, 0xc8 };
++
++/* PDM RX to the PM660L codec (stock cdc_pdm_rx0/rx1_2_active and the compander return pins) on gpio21..25: rx0, comp0, rx1, comp1, rx2 */
++static const u32 t545_pdm_rx_pins[] = { 0x48, 0x48, 0x44, 0x44, 0x44 };
++
+ static int sdm845_snd_startup(struct snd_pcm_substream *substream)
+ {
+ 	unsigned int fmt = SND_SOC_DAIFMT_BP_FP;
+@@ -361,9 +466,30 @@ static int sdm845_snd_startup(struct snd_pcm_substream *substream)
+ 				Q6AFE_LPASS_CLK_ID_SEC_MI2S_IBIT,
+ 				MI2S_BCLK_RATE,	SNDRV_PCM_STREAM_CAPTURE);
+ 		}
++		t545_lpi_pins(rtd->card->dev, 8, t545_sec_mi2s_pins, ARRAY_SIZE(t545_sec_mi2s_pins));
+ 		snd_soc_dai_set_fmt(cpu_dai, fmt);
+ 		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+ 		break;
++	case INT0_MI2S_RX:
++		/* SM-T545 headphones (digital codec RX1/RX2 -> PDM -> PM660L): the AFE bit clock powers LPASS, as for the mic below */
++		ret = snd_soc_dai_set_sysclk(cpu_dai, Q6AFE_LPASS_CLK_ID_INT0_MI2S_IBIT,
++					     MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
++		if (ret)
++			return ret;
++		/* PDM clk/sync (and the tx data pin) are shared with the mic path, same values */
++		t545_lpi_pins(rtd->card->dev, 18, t545_pdm_tx_pins, ARRAY_SIZE(t545_pdm_tx_pins));
++		t545_lpi_pins(rtd->card->dev, 21, t545_pdm_rx_pins, ARRAY_SIZE(t545_pdm_rx_pins));
++		snd_soc_dai_set_fmt(cpu_dai, fmt);
++		break;
++	case INT3_MI2S_TX:
++		/* SM-T545 internal mic: this AFE bit clock powers LPASS, so nothing in LPASS may be touched if it failed */
++		ret = snd_soc_dai_set_sysclk(cpu_dai, Q6AFE_LPASS_CLK_ID_INT3_MI2S_IBIT,
++					     MI2S_BCLK_RATE, SNDRV_PCM_STREAM_CAPTURE);
++		if (ret)
++			return ret;
++		t545_lpi_pins(rtd->card->dev, 18, t545_pdm_tx_pins, ARRAY_SIZE(t545_pdm_tx_pins));
++		snd_soc_dai_set_fmt(cpu_dai, fmt);
++		break;
+ 	case QUATERNARY_MI2S_RX:
+ 		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+ 		snd_soc_dai_set_sysclk(cpu_dai,
+@@ -447,6 +573,14 @@ static void  sdm845_snd_shutdown(struct snd_pcm_substream *substream)
+ 		}
+ 		break;
+ 
++	case INT0_MI2S_RX:
++		snd_soc_dai_set_sysclk(cpu_dai, Q6AFE_LPASS_CLK_ID_INT0_MI2S_IBIT, 0, SNDRV_PCM_STREAM_PLAYBACK);
++		break;
++
++	case INT3_MI2S_TX:
++		snd_soc_dai_set_sysclk(cpu_dai, Q6AFE_LPASS_CLK_ID_INT3_MI2S_IBIT, 0, SNDRV_PCM_STREAM_CAPTURE);
++		break;
++
+ 	case QUATERNARY_TDM_RX_0:
+ 	case QUATERNARY_TDM_TX_0:
+ 		if (--(data->quat_tdm_clk_count) == 0) {
+@@ -564,6 +698,18 @@ static int sdm845_snd_platform_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	/* optional SM-T545 style jack detection by GPIO, replaces the codec MBHC (plug switch active low on gpio125, key on gpio116) */
++	if (of_property_present(dev->of_node, "earjack-det-gpios"))
++		data->earjack_gpios[data->num_earjack_gpios++] = (struct snd_soc_jack_gpio) {
++			.gpiod_dev = dev, .name = "earjack-det", .report = SND_JACK_HEADPHONE, .debounce_time = 100,
++			.data = data, .jack_status_check = sdm845_earjack_det_check,
++		};
++	if (of_property_present(dev->of_node, "earjack-key-gpios"))
++		data->earjack_gpios[data->num_earjack_gpios++] = (struct snd_soc_jack_gpio) {
++			.gpiod_dev = dev, .name = "earjack-key", .report = SND_JACK_BTN_0, .debounce_time = 28,
++			.data = data, .jack_status_check = sdm845_earjack_key_check,
++		};
++
+ 	data->card = card;
+ 	snd_soc_card_set_drvdata(card, data);
+ 
+-- 
+2.47.3
+

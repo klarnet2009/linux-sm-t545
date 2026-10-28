@@ -1,0 +1,76 @@
+From 7fd1663e0fef86f9323b0cdf7e84bb64cf6d4301 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:52 +0200
+Subject: [PATCH 05/14] crypto: qcom-rng: register as hwrng with full quality
+
+Gives Android init an early, credited CRNG source (prng-ee at 0x793000).
+---
+ drivers/crypto/qcom-rng.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/crypto/qcom-rng.c b/drivers/crypto/qcom-rng.c
+index 0685ba122..441b415b7 100644
+--- a/drivers/crypto/qcom-rng.c
++++ b/drivers/crypto/qcom-rng.c
+@@ -46,6 +46,7 @@ struct qcom_rng_ctx {
+ struct qcom_rng_match_data {
+ 	bool skip_init;
+ 	bool hwrng_support;
++	unsigned short hwrng_quality;
+ };
+ 
+ static struct qcom_rng *qcom_rng_dev;
+@@ -116,8 +117,18 @@ static int qcom_rng_seed(struct crypto_rng *tfm, const u8 *seed,
+ static int qcom_hwrng_read(struct hwrng *hwrng, void *data, size_t max, bool wait)
+ {
+ 	struct qcom_rng *qrng = container_of(hwrng, struct qcom_rng, hwrng);
++	int ret;
++
++	ret = clk_prepare_enable(qrng->clk);
++	if (ret)
++		return ret;
+ 
+-	return qcom_rng_read(qrng, data, max);
++	mutex_lock(&qrng->lock);
++	ret = qcom_rng_read(qrng, data, max);
++	mutex_unlock(&qrng->lock);
++	clk_disable_unprepare(qrng->clk);
++
++	return ret;
+ }
+ 
+ static int qcom_rng_enable(struct qcom_rng *rng)
+@@ -209,7 +220,7 @@ static int qcom_rng_probe(struct platform_device *pdev)
+ 	if (rng->match_data->hwrng_support) {
+ 		rng->hwrng.name = "qcom_hwrng";
+ 		rng->hwrng.read = qcom_hwrng_read;
+-		rng->hwrng.quality = QCOM_TRNG_QUALITY;
++		rng->hwrng.quality = rng->match_data->hwrng_quality;
+ 		ret = devm_hwrng_register(&pdev->dev, &rng->hwrng);
+ 		if (ret) {
+ 			dev_err(&pdev->dev, "Register hwrng failed: %d\n", ret);
+@@ -236,14 +247,20 @@ static struct qcom_rng_match_data qcom_prng_match_data = {
+ 	.hwrng_support = false,
+ };
+ 
++/*
++ * SM-T545: the PRNG is a DRBG seeded by the SoC's hardware entropy source (downstream kernels expose it as /dev/hw_random);
++ * as a hwrng, credited at a quarter, it makes the CRNG ready early in the boot (the bootloader passes no rng-seed)
++ */
+ static struct qcom_rng_match_data qcom_prng_ee_match_data = {
+ 	.skip_init = true,
+-	.hwrng_support = false,
++	.hwrng_support = true,
++	.hwrng_quality = 256,
+ };
+ 
+ static struct qcom_rng_match_data qcom_trng_match_data = {
+ 	.skip_init = true,
+ 	.hwrng_support = true,
++	.hwrng_quality = QCOM_TRNG_QUALITY,
+ };
+ 
+ static const struct acpi_device_id __maybe_unused qcom_rng_acpi_match[] = {
+-- 
+2.47.3
+

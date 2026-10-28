@@ -1,0 +1,320 @@
+From 560579ce0d17904412dcd5411315de4a1c801a80 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:53 +0200
+Subject: [PATCH 13/14] misc: fastrpc: park the caller with TASK_FREEZABLE;
+ SM-T545 download timer and vibrator
+
+An interrupted wait returned -ERESTARTSYS during suspend, the ioctl was restarted and the same invocation reached the DSP twice, which is fatal for the ADSP sensors PD (hexagonrpcd). Also adds the t545 download-mode timer and the vibrator driver.
+---
+ drivers/misc/Kconfig         |  10 +++
+ drivers/misc/Makefile        |   2 +
+ drivers/misc/fastrpc.c       |  10 ++-
+ drivers/misc/t545-dltimer.c  |  81 ++++++++++++++++++
+ drivers/misc/t545-vibrator.c | 155 +++++++++++++++++++++++++++++++++++
+ 5 files changed, 257 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/misc/t545-dltimer.c
+ create mode 100644 drivers/misc/t545-vibrator.c
+
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index d7d41b054..6533b8d92 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -5,6 +5,16 @@
+ 
+ menu "Misc devices"
+ 
++config T545_VIBRATOR
++	bool "SM-T545 vibration motor (timed_output sysfs on a regulator)"
++	depends on REGULATOR
++	default y
++
++config T545_DLTIMER
++	bool "SM-T545 bring-up download-mode timer (t545.dl=N)"
++	help
++	  Reboot into Download mode N seconds after boot.
++
+ config SENSORS_LIS3LV02D
+ 	tristate
+ 	depends on INPUT
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index b32a2597d..cbbcfb57e 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -75,3 +75,5 @@ obj-$(CONFIG_MCHP_LAN966X_PCI)	+= lan966x-pci.o
+ obj-y				+= keba/
+ obj-y				+= amd-sbi/
+ obj-$(CONFIG_MISC_RP1)		+= rp1/
++obj-$(CONFIG_T545_DLTIMER)	+= t545-dltimer.o
++obj-$(CONFIG_T545_VIBRATOR)	+= t545-vibrator.o
+diff --git a/drivers/misc/fastrpc.c b/drivers/misc/fastrpc.c
+index ee652ef01..7f35ba877 100644
+--- a/drivers/misc/fastrpc.c
++++ b/drivers/misc/fastrpc.c
+@@ -1202,7 +1202,15 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
+ 		if (!wait_for_completion_timeout(&ctx->work, 10 * HZ))
+ 			err = -ETIMEDOUT;
+ 	} else {
+-		err = wait_for_completion_interruptible(&ctx->work);
++		/*
++		 * t545: TASK_FREEZABLE lets the suspend freezer park the caller here instead of
++		 * interrupting the wait. An interrupted wait returns -ERESTARTSYS, the ioctl is
++		 * restarted and the same invocation goes to the DSP a second time (this driver
++		 * has no context restore); for the ADSP sensors PD reverse-RPC listener
++		 * (hexagonrpcd) the duplicate is fatal: err_qdi.c EX:sensor_process frpc_dsp.
++		 */
++		err = wait_for_completion_state(&ctx->work,
++						TASK_INTERRUPTIBLE | TASK_FREEZABLE);
+ 	}
+ 
+ 	if (err)
+diff --git a/drivers/misc/t545-dltimer.c b/drivers/misc/t545-dltimer.c
+new file mode 100644
+index 000000000..98488bfb8
+--- /dev/null
++++ b/drivers/misc/t545-dltimer.c
+@@ -0,0 +1,81 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Bring-up helper: "t545.dl=N" on the kernel command line reboots the tablet into Samsung's Download mode after N seconds,
++ * whatever userspace (our init or Android) is doing, so that a test boot never needs the keys. While it is armed the apps
++ * watchdog (armed by the bootloader/Android, bite after 30 s) is fed from here: nothing else does it once our init is gone.
++ *
++ * "t545.dl=0" (everyday image): the watchdog feeding and the boot-loop guard only, no timer, restarts reboot normally.
++ *
++ * Boot-loop guard: the chain loader counts the warm-reset boots of a test image in its scratch DRAM (word 1, magic in word 0);
++ * from the 4th boot on the kernel goes straight to Download mode so that a crashing Android never traps the tablet.
++ */
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/reboot.h>
++#include <linux/workqueue.h>
++
++#define T545_WDT_BASE		0x17980000
++#define T545_WDT_RST		0x04
++#define T545_SCRATCH		0xa0f00000
++#define T545_SCRATCH_MAGIC	0x54353435
++#define T545_MAX_BOOTS		4
++
++static unsigned int t545_dl_secs;
++static bool t545_dl_given;
++static void __iomem *t545_wdt;
++bool t545_dl_active;	/* read by kernel_restart(): every restart of a test image goes to Download mode */
++
++static int __init t545_dl_setup(char *s)
++{
++	if (kstrtouint(s, 0, &t545_dl_secs))
++		return 0;
++	t545_dl_given = true;
++	t545_dl_active = t545_dl_secs != 0;
++	return 1;
++}
++__setup("t545.dl=", t545_dl_setup);
++
++static void t545_dl_fn(struct work_struct *w)
++{
++	pr_emerg("t545: download timer expired, rebooting into Download mode\n");
++	kernel_restart("download");
++}
++static DECLARE_DELAYED_WORK(t545_dl_work, t545_dl_fn);
++
++static void t545_wdt_fn(struct work_struct *w);
++static DECLARE_DELAYED_WORK(t545_wdt_work, t545_wdt_fn);
++
++static void t545_wdt_fn(struct work_struct *w)
++{
++	writel(1, t545_wdt + T545_WDT_RST);
++	schedule_delayed_work(&t545_wdt_work, 4 * HZ);
++}
++
++static int __init t545_dl_init(void)
++{
++	void __iomem *scratch;
++	u32 boots = 0;
++
++	if (!t545_dl_given)
++		return 0;
++
++	scratch = ioremap(T545_SCRATCH, 0x10);
++	if (scratch) {
++		if (readl(scratch) == T545_SCRATCH_MAGIC)
++			boots = readl(scratch + 4);
++		iounmap(scratch);
++	}
++	if (boots >= T545_MAX_BOOTS) {
++		pr_emerg("t545: boot #%u of the test image, going to Download mode\n", boots);
++		kernel_restart("download");
++	}
++
++	t545_wdt = ioremap(T545_WDT_BASE, 0x20);
++	if (t545_wdt)
++		schedule_delayed_work(&t545_wdt_work, 0);
++	if (t545_dl_secs)
++		schedule_delayed_work(&t545_dl_work, t545_dl_secs * HZ);
++	return 0;
++}
++late_initcall(t545_dl_init);
+diff --git a/drivers/misc/t545-vibrator.c b/drivers/misc/t545-vibrator.c
+new file mode 100644
+index 000000000..ab1cf019c
+--- /dev/null
++++ b/drivers/misc/t545-vibrator.c
+@@ -0,0 +1,155 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * SM-T545 vibration motor: a coin DC motor behind the PM660L LDO8 (stock "msm_vibrator": samsung,vib_type = "COINDC",
++ * vibr_vdd = pm660l_l8, 3.3 V), on/off only. Samsung's vendor vibrator HAL (legacy libhardware vibrator.default.so) drives the
++ * downstream timed_output class: /sys/class/timed_output/vibrator/enable takes the duration in ms (0 = stop), reads the time left.
++ * shortcut: no intensity control (the rail is fixed), "intensity" is only stored; add PWM-like duty cycling if a weaker buzz is wanted.
++ */
++#include <linux/device.h>
++#include <linux/jiffies.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/platform_device.h>
++#include <linux/regulator/consumer.h>
++#include <linux/workqueue.h>
++
++#define MAX_MS	30000
++
++struct t545_vib {
++	struct regulator *reg;
++	struct delayed_work off;
++	struct mutex lock;
++	unsigned long end;	/* jiffies */
++	unsigned int intensity;
++	bool on;
++};
++
++static void t545_vib_off(struct work_struct *w)
++{
++	struct t545_vib *v = container_of(w, struct t545_vib, off.work);
++
++	mutex_lock(&v->lock);
++	if (v->on) {
++		regulator_disable(v->reg);
++		v->on = false;
++	}
++	mutex_unlock(&v->lock);
++}
++
++static ssize_t enable_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t len)
++{
++	struct t545_vib *v = dev_get_drvdata(dev);
++	int ms, ret = 0;
++
++	if (kstrtoint(buf, 0, &ms))
++		return -EINVAL;
++	if (ms <= 0) {
++		cancel_delayed_work_sync(&v->off);
++		t545_vib_off(&v->off.work);
++		return len;
++	}
++	ms = min(ms, MAX_MS);
++	mutex_lock(&v->lock);
++	if (!v->on) {
++		ret = regulator_enable(v->reg);
++		v->on = !ret;
++	}
++	if (v->on) {
++		v->end = jiffies + msecs_to_jiffies(ms);
++		mod_delayed_work(system_wq, &v->off, msecs_to_jiffies(ms));
++	}
++	mutex_unlock(&v->lock);
++	return ret ? ret : len;
++}
++
++static ssize_t enable_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct t545_vib *v = dev_get_drvdata(dev);
++	long left = v->on ? (long)(v->end - jiffies) : 0;
++
++	return sysfs_emit(buf, "%u\n", left > 0 ? jiffies_to_msecs(left) : 0);
++}
++static DEVICE_ATTR(enable, 0664, enable_show, enable_store);
++
++static ssize_t intensity_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t len)
++{
++	struct t545_vib *v = dev_get_drvdata(dev);
++
++	return kstrtouint(buf, 0, &v->intensity) ? -EINVAL : len;
++}
++
++static ssize_t intensity_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct t545_vib *v = dev_get_drvdata(dev);
++
++	return sysfs_emit(buf, "%u\n", v->intensity);
++}
++static DEVICE_ATTR_RW(intensity);
++
++static ssize_t motor_type_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "COINDC\n");
++}
++static DEVICE_ATTR_RO(motor_type);
++
++static struct attribute *t545_vib_attrs[] = {
++	&dev_attr_enable.attr,
++	&dev_attr_intensity.attr,
++	&dev_attr_motor_type.attr,
++	NULL
++};
++ATTRIBUTE_GROUPS(t545_vib);
++
++static const struct class t545_vib_class = {
++	.name = "timed_output",
++	.dev_groups = t545_vib_groups,
++};
++
++static void t545_vib_cleanup(void *data)
++{
++	struct t545_vib *v = data;
++
++	cancel_delayed_work_sync(&v->off);
++	t545_vib_off(&v->off.work);
++}
++
++static int t545_vib_probe(struct platform_device *pdev)
++{
++	struct t545_vib *v;
++	struct device *d;
++	int ret;
++
++	v = devm_kzalloc(&pdev->dev, sizeof(*v), GFP_KERNEL);
++	if (!v)
++		return -ENOMEM;
++	v->reg = devm_regulator_get(&pdev->dev, "vibr");
++	if (IS_ERR(v->reg))
++		return dev_err_probe(&pdev->dev, PTR_ERR(v->reg), "vibr-supply\n");
++	/* as the stock driver: 100 mA load puts the LDO in high-power mode (without it, enabling the rail resets the SoC) */
++	ret = regulator_set_load(v->reg, 100000);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret, "set_load\n");
++	v->intensity = 10000;
++	mutex_init(&v->lock);
++	INIT_DELAYED_WORK(&v->off, t545_vib_off);
++	ret = devm_add_action_or_reset(&pdev->dev, t545_vib_cleanup, v);
++	if (ret)
++		return ret;
++	ret = class_register(&t545_vib_class);
++	if (ret && ret != -EEXIST)
++		return ret;
++	d = device_create(&t545_vib_class, &pdev->dev, 0, v, "vibrator");
++	return PTR_ERR_OR_ZERO(d);
++}
++
++static const struct of_device_id t545_vib_of[] = {
++	{ .compatible = "samsung,t545-vibrator" },
++	{ }
++};
++
++static struct platform_driver t545_vib_driver = {
++	.probe = t545_vib_probe,
++	.driver = { .name = "t545-vibrator", .of_match_table = t545_vib_of, .suppress_bind_attrs = true },
++};
++builtin_platform_driver(t545_vib_driver);
+-- 
+2.47.3
+

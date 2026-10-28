@@ -1,0 +1,31 @@
+From 1b994743b1e22f1931e5e0077745e603d6882fff Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:53 +0200
+Subject: [PATCH 14/14] ath10k: mac: do not advertise the bogus VHT160 of the
+ WCN3990 firmware
+
+The firmware reports VHT160 support it does not have; 5 GHz association failed with code 18.
+---
+ drivers/net/wireless/ath/ath10k/mac.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/net/wireless/ath/ath10k/mac.c b/drivers/net/wireless/ath/ath10k/mac.c
+index 73aa93043..9a7ae0bee 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.c
++++ b/drivers/net/wireless/ath/ath10k/mac.c
+@@ -4903,6 +4903,12 @@ static struct ieee80211_sta_vht_cap ath10k_create_vht_cap(struct ath10k *ar)
+ 	vht_cap.vht_supported = 1;
+ 	vht_cap.cap = ar->vht_cap_info;
+ 
++	/* t545: the WCN3990 firmware reports 160 and 80+80 MHz support, which the chip does not have (qcacld builds its own
++	 * VHT caps from WCNSS_qcom_cfg.ini, 80 MHz max). With them a TP-Link 5 GHz AP denied the association (status 18). */
++	if (ar->hw_rev == ATH10K_HW_WCN3990)
++		vht_cap.cap &= ~(IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_MASK | IEEE80211_VHT_CAP_SHORT_GI_160 |
++				 IEEE80211_VHT_CAP_EXT_NSS_BW_MASK);
++
+ 	if (ar->vht_cap_info & (IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE |
+ 				IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE)) {
+ 		val = ath10k_mac_get_vht_cap_bf_sts(ar);
+-- 
+2.47.3
+

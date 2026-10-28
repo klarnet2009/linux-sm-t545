@@ -1,0 +1,1668 @@
+From 70393306e26059ca28786674b442494ff1a7fbbb Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:53 +0200
+Subject: [PATCH 11/14] power/usb: SM5705 charger and fuel gauge, S2MM005
+ Type-C, Android USB gadget glue
+
+Charger and fuel gauge for the SM5705, the S2MM005 USB-PD/Type-C driver, and the glue that lets the Android USB HAL configure the gadget.
+---
+ drivers/power/supply/Kconfig           |   7 +
+ drivers/power/supply/Makefile          |   1 +
+ drivers/power/supply/sm5705-chg-t545.c | 930 +++++++++++++++++++++++++
+ drivers/power/supply/sm5705-fg-t545.c  | 193 +++++
+ drivers/usb/gadget/Makefile            |   1 +
+ drivers/usb/gadget/t545-android-usb.c  |  47 ++
+ drivers/usb/typec/Kconfig              |   9 +
+ drivers/usb/typec/Makefile             |   1 +
+ drivers/usb/typec/s2mm005-t545.c       | 380 ++++++++++
+ 9 files changed, 1569 insertions(+)
+ create mode 100644 drivers/power/supply/sm5705-chg-t545.c
+ create mode 100644 drivers/power/supply/sm5705-fg-t545.c
+ create mode 100644 drivers/usb/gadget/t545-android-usb.c
+ create mode 100644 drivers/usb/typec/s2mm005-t545.c
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index 4d4345aa4..095e74353 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -223,6 +223,13 @@ config BATTERY_OLPC
+ 	help
+ 	  Say Y to enable support for the battery on the OLPC laptop.
+ 
++config BATTERY_SM5705_FG_T545
++	tristate "SM5705 fuel gauge of the SM-T545"
++	depends on I2C
++	depends on REGULATOR
++	help
++	  Read-only battery power supply (voltage, current, temperature, capacity) of the Galaxy Tab Active Pro LTE.
++
+ config BATTERY_SAMSUNG_SDI
+ 	bool "Samsung SDI batteries"
+ 	help
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index ce2f45704..52238d22e 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -129,3 +129,4 @@ obj-$(CONFIG_BATTERY_UG3105)	+= ug3105_battery.o
+ obj-$(CONFIG_BATTERY_QCOM_FG)	+= qcom_fg.o
+ obj-$(CONFIG_CHARGER_QCOM_SMB2)	+= qcom_smbx.o
+ obj-$(CONFIG_FUEL_GAUGE_MM8013)	+= mm8013.o
++obj-$(CONFIG_BATTERY_SM5705_FG_T545)	+= sm5705-fg-t545.o sm5705-chg-t545.o
+diff --git a/drivers/power/supply/sm5705-chg-t545.c b/drivers/power/supply/sm5705-chg-t545.c
+new file mode 100644
+index 000000000..d09fbe8ce
+--- /dev/null
++++ b/drivers/power/supply/sm5705-chg-t545.c
+@@ -0,0 +1,930 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * SM5705 charger of the SM-T545 (Galaxy Tab Active Pro), minimal mainline driver.
++ *
++ * Register layout and per-source currents from Samsung's drivers/battery_v2/sm5705_charger.c and the stock DT battery node. The
++ * bootloader leaves the charger in CHG_ON with nCHGEN (gpio134) low; this driver follows VBUS, asks the SM5705 MUIC (0x25 on the
++ * same bus) for the BC1.2 source type and sets input/charge currents. Two supplies for Android's BatteryMonitor: "sm5705-usb" (PC
++ * port, CDP) and "sm5705-ac" (wall adapter), both supplying "battery" (sm5705-fg-t545).
++ * shortcut: VBUS is polled every 2 s instead of using the charger IRQ (stock "charger_int_gpio"); wire it up if plug-in latency matters.
++ * On a PC port (SDP/CDP) the driver keeps the system awake, like the stock dwc3-msm while a host is attached: otherwise the power
++ * button puts it into s2idle and the USB link (adb, MTP) is gone until the next wakeup (parameter pc_port_awake, 0 for suspend tests).
++ *
++ * Fast charging, off unless /sys/module/sm5705_chg_t545/parameters/fast_charge is 1: an explicit USB-PD contract read from the
++ * S2MM005 (DT "samsung,pdic"; its own firmware negotiates, we only read it and pick a PDO like the stock policy), or Samsung AFC
++ * 9 V through the MUIC (only on a legacy Rp 56k source, as stock). Unplug, VBUS OVP, a failed step, the temperature leaving the
++ * stock swelling window or fast_charge=0 fall back to 5 V and the DCP limits. Source of every limit: Samsung 4.9 tree, file:line.
++ *
++ * USB OTG: the "usb-otg-vbus" child regulator is the VBUS of the Type-C port when the tablet is the source (consumer: the
++ * S2MM005 connector). Stock path: usb_notifier_qcom.c otg_accessory_power -> psy "otg" -> sm5705_charger_oper.c table; the
++ * PM660 "smb2-vbus" of the stock DT is unused there (CONFIG_QPNP_SMB2 is not set). Enable = MUIC by hand to the AP USB path,
++ * 5.1 V boost, 1.5 A limit, USB_OTG mode; refused while an external VBUS is present.
++ */
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/devm-helpers.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/leds.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/pm_wakeup.h>
++#include <linux/power_supply.h>
++#include <linux/regulator/driver.h>
++#include <linux/workqueue.h>
++
++#define REG_STATUS1		0x08	/* bit 0 VBUSPOK, bit 2 VBUSOVP (include/linux/mfd/sm5705/sm5705.h:168-170) */
++#define REG_STATUS2		0x09	/* bit 3 CHGON, bit 5 TOPOFF, bit 6 DONE */
++#define REG_STATUS3		0x0a	/* bit 2 OTGFAIL (sm5705.h:190-197, sm5705_chg_otg_fail_isr sm5705_charger.c:1489-1512) */
++#define REG_CNTL		0x0c	/* [2:0] operation mode */
++#define REG_VBUSCNTL		0x0d	/* VBUS input limit = (mA - 100) / 25 */
++#define REG_CHGCNTL2		0x10	/* fast charge current from VBUS = (mA - 100) / 50 */
++#define REG_CHGCNTL6		0x14	/* [3:2] OTG current limit (sm5705_charger_oper.c:33-38, :103-106) */
++#define REG_CHGCNTL7		0x15	/* bit 2 OVPSEL: stock sets it at init (sm5705_charger.c:215-227, :1796) */
++#define STATUS1_VBUSPOK		BIT(0)
++#define STATUS1_VBUSOVP		BIT(2)
++#define STATUS3_OTGFAIL		BIT(2)
++#define CHGCNTL6_OTG_MASK	0x0c
++#define OTG_500MA		(0 << 2)
++#define OTG_1500MA		(3 << 2)
++#define CHGCNTL7_OVPSEL		BIT(2)
++#define CNTL_MODE_MASK		0x07
++#define CNTL_MODE_SUSPEND	0x00
++#define CNTL_MODE_CHG_ON	0x05
++#define CNTL_MODE_FLASH_BOOST	0x06	/* battery boost powers the flash LED when there is no VBUS */
++#define CNTL_MODE_USB_OTG	0x07	/* battery boost drives VBUS */
++
++/* flash LED driver of the same chip (Samsung leds-sm5705.c, GPIO controlled FLED0): torch/flash pins are on the GPIO expander */
++#define REG_FLED1CNTL1		0x17	/* [1:0] 0 off, 3 on by the external pins */
++#define REG_FLED1CNTL2		0x18	/* one-shot timer, the stock driver writes 4 (500 ms) before every torch */
++#define REG_FLED1CNTL4		0x1a	/* torch current = (mA - 10) / 10 */
++#define REG_FLEDCNTL6		0x20	/* [3:0] boost output voltage, 5 = 4.5 V */
++#define FLEDCNTL6_BST_MASK	0x0f
++#define BST_4500MV		0x05	/* every non-OTG row of the stock table */
++#define BST_5100MV		0x0b	/* USB_OTG rows (sm5705_charger_oper.c:85-88) */
++#define FLED_EXTERNAL		0x03
++#define TORCH_MA		220	/* stock torch-mode-current-mA */
++
++#define MUIC_ADDR		0x25
++#define MUIC_CTRL		0x02	/* bit 2 = automatic switching (muic_regmap_sm5705.c:134-138, :676-708) */
++#define CTRL_AUTO_SW		BIT(2)
++#define MUIC_MANSW1		0x13	/* DM [7:5], DP [4:2]: 0 open, 1 USB (muic_regmap_sm5705.c:206-207, :285-311) */
++#define MANSW1_OPEN		0x00
++#define MANSW1_USB		0x24
++#define MUIC_INT3		0x05	/* AFC interrupts, read-clear (muic_regmap_sm5705.c:149-154) */
++#define INT3_AFC_TA		BIT(0)
++#define INT3_ACCEPTED		BIT(1)
++#define INT3_VBUS_UPDATE	BIT(2)
++#define INT3_MULTI_BYTE		BIT(3)
++#define INT3_ERROR		BIT(5)
++#define MUIC_DEVT1		0x0a
++#define DEVT1_DCP		0x40	/* muic_regmap_sm5705.c:267 */
++#define MUIC_DEVT3		0x0c
++#define DEVT3_AFC_TA		BIT(7)	/* muic_regmap_sm5705.c:192 */
++#define MUIC_RSVDID2		0x16
++#define RSVDID2_VDP_SRC_EN	BIT(3)	/* muic_afc.c:435-437 */
++#define MUIC_CHGTYPE		0x17	/* BC1.2 result: 1 DCP, 2 CDP, 4 SDP, 8 SDP after DCD timeout, 0 = not done yet */
++#define CHGTYPE_DCP		0x01
++#define CHGTYPE_CDP		0x02
++#define MUIC_AFCCNTL		0x18	/* bits: include/linux/muic/muic_afc.h:28-33 */
++#define AFC_ENAFC		BIT(0)
++#define AFC_VBUS_READ		BIT(3)
++#define AFC_DIS_AFC		BIT(5)
++#define AFC_ENQC20		BIT(6)
++#define MUIC_AFCTXD		0x19
++#define AFCTXD_9V_1650MA	0x46	/* muic_regmap_sm5705.c:80, :1007 (18 W TA support is off in the stock defconfig) */
++#define MUIC_AFCSTAT		0x1a
++#define MUIC_VBUSSTAT		0x1b	/* [3:0] = VBUS - 5 V after VBUS_READ (muic_regmap_sm5705.c:727-800) */
++#define MUIC_AFCCNTL2		0x32	/* stock init 0x40 (muic_regmap_sm5705.c:79, :362) */
++#define MUIC_AFC_DMCNTL		0x37	/* stock init 0x20 (muic_regmap_sm5705.c:69, :363) */
++
++/* S2MM005 SRAM: 16-bit big-endian address, little-endian 32-bit words (include/linux/ccic/s2mm005.h, s2mm005.c:85-206) */
++#define PD_REG_DUMMY		0x0008	/* read first, wakes the controller (s2mm005_cc.c:691-694) */
++#define PD_REG_CMD		0x0010	/* I2C_SLV_CMD (s2mm005.h:46) */
++#define PD_REG_FUNC_STATE	0x0020
++#define PD_REG_LP_STATE		0x0060
++#define PD_REG_TX_REQUEST	0x0240	/* our request: header word 0, RDO word 1 (s2mm005_pd.c:345-351) */
++#define PD_REG_RX_SRC_CAPA	0x0260	/* source caps: header word 0, PDOs words 1..7 (s2mm005_pd.c:341-343) */
++#define FS_PD_STATE		GENMASK(7, 0)	/* FUNC_STATE layout: s2mm005.h:186-198 */
++#define FS_ATTACH_DONE		BIT(24)
++#define FS_IS_SOURCE		BIT(25)
++#define FS_RP_LVL		GENMASK(28, 27)	/* 1 = Rp 56k (s2mm005.h:801) */
++#define FS_SHORT		(BIT(29) | BIT(30))	/* VBUS-CC / VBUS-SBU short */
++#define LP_WATER		BIT(3)	/* LP_STATE: s2mm005.h:205-216 */
++#define PD_SNK_WAIT_CAPS	17	/* s2mm005.h:754 */
++#define PD_SNK_READY		21	/* s2mm005.h:758 */
++
++/* stock limits: arch/arm64/boot/dts/samsung/sdm670-sec-gtactivexl-battery-common.dtsi */
++#define AFC_PREP_MA		500	/* pre_afc_input_current :219, PREPARE_TA current_group_1 :518-521 */
++#define AFC_INPUT_MA		1500	/* 9V_TA (cable 6) current_group_4 :533-536 */
++#define AFC_CHARGE_MA		2900
++#define PD_MAX_MW		15000	/* pd_charging_charge_power :414 */
++#define PD_MAX_MV		9000	/* max_input_voltage :415 */
++#define PD_MAX_INPUT_MA		3000	/* max_input_current :416 */
++#define MAX_CHARGE_MA		2900	/* max_charging_current :417 */
++#define FLOAT_MV		4220	/* chg_float_voltage :215 */
++#define HV_TRIES		3
++
++#define POLL_MS			2000
++#define BC12_POLLS		3	/* give the MUIC up to ~6 s for BC1.2 before treating the source as a PC port */
++
++static bool fast_charge;
++module_param(fast_charge, bool, 0644);
++MODULE_PARM_DESC(fast_charge, "allow USB-PD (<= 9 V, <= 15 W) and AFC 9 V input; writing 0 drops back to 5 V within 2 s");
++
++static bool pc_port_awake = true;
++module_param(pc_port_awake, bool, 0644);
++MODULE_PARM_DESC(pc_port_awake, "keep the system awake while a PC port (SDP/CDP) supplies VBUS, as stock (adb/MTP stay up)");
++
++enum { SRC_NONE, SRC_SDP, SRC_CDP, SRC_DCP };
++enum { HV_OFF, HV_AFC_DETECT, HV_PD_WAIT, HV_AFC, HV_PD };
++
++/* stock current groups: TA 1800/2100 mA, CDP 1000/1000 mA, USB 500/500 mA */
++static const struct { int input_ma, charge_ma; } src_ma[] = {
++	[SRC_NONE] = { 500, 500 },
++	/* stock limits a PC port to 500 mA, less than the screen draws; AICL backs off when the port's VBUS sags */
++	[SRC_SDP] = { 1000, 1000 },
++	[SRC_CDP] = { 1000, 1000 },
++	[SRC_DCP] = { 1800, 2100 },
++};
++
++struct sm5705_chg {
++	struct i2c_client *client;
++	struct i2c_client *muic;
++	struct i2c_client *pd;		/* S2MM005, NULL without "samsung,pdic" */
++	struct power_supply *usb;
++	struct power_supply *ac;
++	struct delayed_work work;
++	int src;
++	int bc12_polls;
++	struct led_classdev torch;
++	struct gpio_desc *torch_gpio, *flash_gpio;
++	bool torch_on;
++	int hv, hv_tries, hv_polls, pdo;
++	int input_ma, charge_ma, mv;	/* what is programmed */
++	bool awake;			/* the wakeup source is held (PC port) */
++	struct mutex lock;		/* operation mode: poll work, torch, OTG regulator */
++	struct regulator_dev *otg;	/* NULL without the "usb-otg-vbus" DT child */
++	bool otg_on;
++	bool otg_holdoff;		/* skip one poll after the boost stops: our own VBUS is still decaying */
++	int muic_ctrl;			/* MUIC CTRL before OTG took the switch over */
++};
++
++struct pd_state {
++	u32 fs, lp, rdo;
++	u32 pdo[8];			/* [1..n], fixed 5 V PDO 1 checked */
++	int n;				/* 0 = no explicit contract */
++};
++
++static int chg_set_mode(struct sm5705_chg *chg, int mode)
++{
++	int ret = i2c_smbus_read_byte_data(chg->client, REG_CNTL);
++
++	if (ret >= 0 && (ret & CNTL_MODE_MASK) != mode)
++		ret = i2c_smbus_write_byte_data(chg->client, REG_CNTL, (ret & ~CNTL_MODE_MASK) | mode);
++	return ret < 0 ? ret : 0;
++}
++
++static int reg_update(struct i2c_client *c, u8 reg, u8 mask, u8 val)
++{
++	int ret = i2c_smbus_read_byte_data(c, reg);
++
++	if (ret < 0)
++		return ret;
++	return i2c_smbus_write_byte_data(c, reg, (ret & ~mask) | (val & mask));
++}
++
++/* the stock operation-mode table (sm5705_charger_oper.c:59-89) reduced to what this board uses: the OTG boost wins without
++ * VBUS (also with the torch on), the flash boost runs the torch from the battery, anything else charges */
++static int chg_apply_mode(struct sm5705_chg *chg, bool vbus)
++{
++	if (chg->otg_on)
++		return chg_set_mode(chg, CNTL_MODE_USB_OTG);
++	return chg_set_mode(chg, chg->torch_on && !vbus ? CNTL_MODE_FLASH_BOOST : CNTL_MODE_CHG_ON);
++}
++
++static int chg_set(struct sm5705_chg *chg, int input_ma, int charge_ma, int mv)
++{
++	int input = clamp(input_ma, 100, 3275);
++	int charge = clamp(charge_ma, 200, 3250);
++	int ret;
++
++	ret = i2c_smbus_write_byte_data(chg->client, REG_VBUSCNTL, (input - 100) / 25);
++	if (!ret)
++		ret = i2c_smbus_write_byte_data(chg->client, REG_CHGCNTL2, (charge - 100) / 50);
++	if (ret)
++		return ret;
++	chg->input_ma = input_ma;
++	chg->charge_ma = charge_ma;
++	chg->mv = mv;
++	/* callers set chg->src first */
++	return chg_apply_mode(chg, chg->src != SRC_NONE);
++}
++
++/* the stock charger always runs with OVPSEL = 1 (sm5705_charger.c:1796); make sure of it before VBUS goes above 5 V */
++static bool chg_ovpsel_ok(struct sm5705_chg *chg)
++{
++	int ret = reg_update(chg->client, REG_CHGCNTL7, CHGCNTL7_OVPSEL, CHGCNTL7_OVPSEL);
++
++	if (!ret)
++		ret = i2c_smbus_read_byte_data(chg->client, REG_CHGCNTL7);
++	return ret >= 0 && (ret & CHGCNTL7_OVPSEL);
++}
++
++/* stock swelling window (battery dtsi :221-224): leave HV at >= 41.0 or < 15.0 C, enter only within 20.0..39.0 C */
++static bool hv_temp_ok(struct sm5705_chg *chg)
++{
++	struct power_supply *bat = power_supply_get_by_name("battery");
++	union power_supply_propval t;
++	int ret = -ENODEV;
++
++	if (bat) {
++		ret = power_supply_get_property(bat, POWER_SUPPLY_PROP_TEMP, &t);
++		power_supply_put(bat);
++	}
++	if (ret)
++		return false;
++	if (chg->hv != HV_OFF)
++		return t.intval >= 150 && t.intval < 410;
++	return t.intval >= 200 && t.intval <= 390;
++}
++
++/* VBUS in V from the MUIC ADC (muic_regmap_sm5705.c:728-800), -errno if it does not answer */
++static int vbus_volts(struct sm5705_chg *chg)
++{
++	int i, ret;
++
++	reg_update(chg->muic, MUIC_AFCCNTL, AFC_VBUS_READ, AFC_VBUS_READ);
++	msleep(20);
++	reg_update(chg->muic, MUIC_AFCCNTL, AFC_VBUS_READ, 0);
++	for (i = 0; i < 20; i++) {
++		ret = i2c_smbus_read_byte_data(chg->muic, MUIC_INT3);
++		if (ret < 0)
++			return ret;
++		if (ret & INT3_VBUS_UPDATE) {
++			ret = i2c_smbus_read_byte_data(chg->muic, MUIC_VBUSSTAT);
++			return ret < 0 ? ret : (ret & 0xf) + 5;
++		}
++		msleep(50);
++	}
++	return -ETIMEDOUT;
++}
++
++/* back to 5 V: muic_dpreset_afc (muic_afc.c:288-298) */
++static void afc_to_5v(struct sm5705_chg *chg)
++{
++	reg_update(chg->muic, MUIC_AFCCNTL, AFC_ENAFC, 0);
++	msleep(50);
++	reg_update(chg->muic, MUIC_RSVDID2, RSVDID2_VDP_SRC_EN, 0);
++	reg_update(chg->muic, MUIC_AFCCNTL, AFC_ENQC20, 0);
++	reg_update(chg->muic, MUIC_AFCCNTL, AFC_DIS_AFC, AFC_DIS_AFC);
++	msleep(60);
++	reg_update(chg->muic, MUIC_AFCCNTL, AFC_DIS_AFC, 0);
++}
++
++/* 9 V request as sm5705_afc_ta_attach/_ta_accept/_vbus_update/_error (muic_regmap_sm5705.c:939-1465); true = VBUS 8..10 V */
++static bool afc_negotiate(struct sm5705_chg *chg)
++{
++	int i, j, v, int3, errors = 0;
++
++	/* input limit down to the PREPARE_TA level before VBUS rises (muic_regmap_sm5705.c:981-988) */
++	if (chg_set(chg, AFC_PREP_MA, AFC_PREP_MA, 5000))
++		return false;
++	i2c_smbus_read_byte_data(chg->muic, MUIC_AFCSTAT);	/* read-clear */
++	if (i2c_smbus_write_byte_data(chg->muic, MUIC_AFCTXD, AFCTXD_9V_1650MA) ||
++	    reg_update(chg->muic, MUIC_AFCCNTL, AFC_ENAFC, AFC_ENAFC))
++		return false;
++	for (i = 0; i < 40; i++) {	/* ~2 s; stock arms a 5 s retry work (muic_regmap_sm5705.c:999) */
++		msleep(50);
++		int3 = i2c_smbus_read_byte_data(chg->muic, MUIC_INT3);
++		/* MULTI_BYTE: the TA lists other voltages; stock would take the highest one (:1355-1391), we stay at 5 V */
++		if (int3 < 0 || (int3 & INT3_MULTI_BYTE))
++			return false;
++		if (int3 & INT3_ERROR) {	/* retry up to 5 times after 100 ms (:1424-1452) */
++			if (++errors > 5)
++				return false;
++			msleep(100);
++			reg_update(chg->muic, MUIC_AFCCNTL, AFC_ENAFC, AFC_ENAFC);
++			continue;
++		}
++		if (!(int3 & INT3_ACCEPTED))
++			continue;
++		reg_update(chg->muic, MUIC_AFCCNTL, AFC_ENAFC, 0);	/* :1077 */
++		for (j = 0; j < 5; j++) {	/* TXD nibble 4 = 9 V, accepted +-1 (:1265-1296) */
++			v = vbus_volts(chg);
++			if (v >= 8 && v <= 10)
++				return true;
++			msleep(100);
++		}
++		return false;
++	}
++	return false;
++}
++
++static int pd_read(struct sm5705_chg *chg, u16 reg, void *buf, u16 len)
++{
++	u8 addr[2] = { reg >> 8, reg & 0xff };
++	struct i2c_msg msg[2] = {
++		{ .addr = chg->pd->addr, .len = 2, .buf = addr },
++		{ .addr = chg->pd->addr, .flags = I2C_M_RD, .len = len, .buf = buf },
++	};
++	int ret = i2c_transfer(chg->pd->adapter, msg, 2);
++
++	return ret == 2 ? 0 : ret < 0 ? ret : -EIO;
++}
++
++/* s2mm005_select_pdo (s2mm005_pd.c:74-82): object position, then re-run the sink request */
++static int pd_select(struct sm5705_chg *chg, u8 pdo)
++{
++	u8 sel[] = { PD_REG_CMD >> 8, PD_REG_CMD & 0xff, 0x03, 0x03, pdo };
++	u8 req[] = { PD_REG_CMD >> 8, PD_REG_CMD & 0xff, 0x03, 0x02, PD_SNK_WAIT_CAPS };
++	int ret = i2c_master_send(chg->pd, sel, sizeof(sel));
++
++	if (ret == sizeof(sel))
++		ret = i2c_master_send(chg->pd, req, sizeof(req));
++	return ret == sizeof(req) ? 0 : ret < 0 ? ret : -EIO;
++}
++
++static u32 pdo_mv(u32 pdo) { return ((pdo >> 10) & 0x3ff) * 50; }	/* SRC_FIXED_SUPPLY: s2mm005.h:544-557 */
++static u32 pdo_ma(u32 pdo) { return (pdo & 0x3ff) * 10; }
++
++static int pd_get(struct sm5705_chg *chg, struct pd_state *s)
++{
++	__le32 w[8];
++	int i, ret;
++
++	memset(s, 0, sizeof(*s));
++	pd_read(chg, PD_REG_DUMMY, w, 1);
++	ret = pd_read(chg, PD_REG_FUNC_STATE, &w[0], 4);
++	if (!ret)
++		ret = pd_read(chg, PD_REG_LP_STATE, &w[1], 4);
++	if (ret)
++		return ret;
++	s->fs = le32_to_cpu(w[0]);
++	s->lp = le32_to_cpu(w[1]);
++	if (FIELD_GET(FS_PD_STATE, s->fs) != PD_SNK_READY || !(s->fs & FS_ATTACH_DONE) || (s->fs & FS_IS_SOURCE))
++		return 0;
++	ret = pd_read(chg, PD_REG_TX_REQUEST, w, 8);
++	if (ret)
++		return ret;
++	s->rdo = le32_to_cpu(w[1]);
++	ret = pd_read(chg, PD_REG_RX_SRC_CAPA, w, sizeof(w));
++	if (ret)
++		return ret;
++	s->n = (le32_to_cpu(w[0]) >> 12) & 7;	/* MSG_HEADER Number_of_obj (s2mm005.h:522-532) */
++	for (i = 1; i <= s->n; i++)
++		s->pdo[i] = le32_to_cpu(w[i]);
++	/* PDO 1 is the fixed 5 V supply by the PD spec and the RDO points into the list; anything else is not trusted */
++	i = FIELD_GET(GENMASK(30, 28), s->rdo);
++	if (!s->n || s->pdo[1] >> 30 || pdo_mv(s->pdo[1]) != 5000 || !pdo_ma(s->pdo[1]) || i < 1 || i > s->n)
++		s->n = 0;
++	return 0;
++}
++
++/* make_pd_list (sec_battery.c:7193-7217): highest fixed PDO <= 9 V and <= 15 W, not below the 5 V power - 1 W */
++static int pd_pick(const struct pd_state *s)
++{
++	u32 p1 = pdo_mv(s->pdo[1]) * pdo_ma(s->pdo[1]), best_p = 0, best_mv = 5000;
++	int i, best = 1;
++
++	for (i = 1; i <= s->n; i++) {
++		u32 mv = pdo_mv(s->pdo[i]), p = mv * pdo_ma(s->pdo[i]);
++
++		if (s->pdo[i] >> 30)	/* fixed supplies only (s2mm005_pd.c:166) */
++			continue;
++		if (p + 1000000 >= p1 && p <= PD_MAX_MW * 1000 && p >= best_p && mv > best_mv && mv <= PD_MAX_MV) {
++			best = i;
++			best_mv = mv;
++			best_p = p;
++		}
++	}
++	return best;
++}
++
++/* currents of the PDO in use (sec_battery.c:942-962), also capped by the RDO's max operating current */
++static void pd_apply(struct sm5705_chg *chg, const struct pd_state *s, int i)
++{
++	u32 mv = pdo_mv(s->pdo[i]), rdo_ma = (s->rdo & 0x3ff) * 10;
++	u32 ma = min_t(u32, pdo_ma(s->pdo[i]), PD_MAX_INPUT_MA);
++
++	if (rdo_ma && rdo_ma < ma)
++		ma = rdo_ma;
++	if (chg_set(chg, ma, min_t(u32, mv * ma / FLOAT_MV, MAX_CHARGE_MA), mv))
++		return;
++	chg->hv = HV_PD;
++	chg->pdo = i;
++	dev_info(&chg->client->dev, "PD contract PDO %d %u mV: input %d mA, charge %d mA\n", i, mv, chg->input_ma, chg->charge_ma);
++}
++
++/* to 5 V; currents only go down here, the next poll restores the DCP ones once VBUS has settled */
++static void hv_fallback(struct sm5705_chg *chg, const char *why)
++{
++	if (chg->hv == HV_AFC_DETECT || chg->hv == HV_AFC)
++		afc_to_5v(chg);
++	else if (chg->pd && chg->pdo > 1)
++		pd_select(chg, 1);	/* HV disable -> select_pdo(1) (sec_battery.c:6431) */
++	dev_info(&chg->client->dev, "fast charge off (%s), 5 V\n", why);
++	chg->hv = HV_OFF;
++	chg->pdo = 0;
++	chg_set(chg, min(chg->input_ma, src_ma[chg->src].input_ma), min(chg->charge_ma, src_ma[chg->src].charge_ma), 5000);
++}
++
++static void afc_start(struct sm5705_chg *chg)
++{
++	struct i2c_client *m = chg->muic;
++
++	dev_info(&chg->client->dev, "AFC start: DEVT1 %02x DEVT3 %02x CHGTYPE %02x RSVDID2 %02x AFCCNTL %02x CNTL2 %02x DMCNTL %02x\n",
++		 i2c_smbus_read_byte_data(m, MUIC_DEVT1), i2c_smbus_read_byte_data(m, MUIC_DEVT3),
++		 i2c_smbus_read_byte_data(m, MUIC_CHGTYPE), i2c_smbus_read_byte_data(m, MUIC_RSVDID2),
++		 i2c_smbus_read_byte_data(m, MUIC_AFCCNTL), i2c_smbus_read_byte_data(m, MUIC_AFCCNTL2),
++		 i2c_smbus_read_byte_data(m, MUIC_AFC_DMCNTL));
++	i2c_smbus_write_byte_data(m, MUIC_AFCCNTL2, 0x40);
++	i2c_smbus_write_byte_data(m, MUIC_AFC_DMCNTL, 0x20);
++	i2c_smbus_read_byte_data(m, MUIC_INT3);
++	/* D+ source on; an AFC TA answers with AFC_TA (muic_state.c:294) */
++	if (reg_update(m, MUIC_RSVDID2, RSVDID2_VDP_SRC_EN, RSVDID2_VDP_SRC_EN))
++		return;
++	chg->hv = HV_AFC_DETECT;
++	chg->hv_polls = 0;
++}
++
++static void afc_detect_poll(struct sm5705_chg *chg)
++{
++	int int3 = i2c_smbus_read_byte_data(chg->muic, MUIC_INT3);
++	int devt3 = i2c_smbus_read_byte_data(chg->muic, MUIC_DEVT3);
++
++	if ((int3 > 0 && (int3 & INT3_AFC_TA)) || (devt3 > 0 && (devt3 & DEVT3_AFC_TA))) {
++		if (!afc_negotiate(chg)) {
++			hv_fallback(chg, "AFC negotiation failed");
++		} else if (!chg_set(chg, AFC_INPUT_MA, AFC_CHARGE_MA, 9000)) {
++			chg->hv = HV_AFC;
++			dev_info(&chg->client->dev, "AFC 9 V: input %d mA, charge %d mA\n", AFC_INPUT_MA, AFC_CHARGE_MA);
++		}
++		return;
++	}
++	/* stock: DP reset every 1.7 s while the MUIC still sees a plain DCP, at most 5 times (muic_afc.c:466-487) */
++	if (++chg->hv_polls > 5) {
++		chg->hv_tries = HV_TRIES;	/* plain DCP, do not retry until replug */
++		hv_fallback(chg, "no AFC TA");
++		return;
++	}
++	if (i2c_smbus_read_byte_data(chg->muic, MUIC_DEVT1) == DEVT1_DCP) {
++		reg_update(chg->muic, MUIC_AFCCNTL, AFC_DIS_AFC, AFC_DIS_AFC);
++		msleep(60);
++		reg_update(chg->muic, MUIC_AFCCNTL, AFC_DIS_AFC, 0);
++	}
++}
++
++static void hv_poll(struct sm5705_chg *chg, int status1)
++{
++	struct pd_state s;
++	bool have_pd;
++	int cur, i, v;
++
++	if (!fast_charge || (status1 & STATUS1_VBUSOVP) || !hv_temp_ok(chg)) {
++		if (chg->hv != HV_OFF)
++			hv_fallback(chg, !fast_charge ? "disabled" : (status1 & STATUS1_VBUSOVP) ? "VBUS OVP" : "temperature");
++		goto restore;
++	}
++	have_pd = chg->pd && !pd_get(chg, &s);
++	cur = have_pd ? FIELD_GET(GENMASK(30, 28), s.rdo) : 0;
++	switch (chg->hv) {
++	case HV_AFC:	/* the TA drops to 5 V by itself on unplug; OVP and temperature are checked above */
++		return;
++	case HV_PD:
++		if (!have_pd || !s.n || cur != chg->pdo)
++			hv_fallback(chg, "PD contract changed");
++		return;
++	case HV_PD_WAIT:
++		if (have_pd && s.n && cur == chg->pdo) {
++			v = pdo_mv(s.pdo[cur]) > 5000 ? vbus_volts(chg) : 5;
++			if (v > 0 && abs(v * 1000 - (int)pdo_mv(s.pdo[cur])) <= 1000) {
++				pd_apply(chg, &s, cur);
++				return;
++			}
++		}
++		if (++chg->hv_polls > 2)
++			hv_fallback(chg, "PDO switch not confirmed");
++		return;
++	case HV_AFC_DETECT:
++		afc_detect_poll(chg);
++		return;
++	}
++	if (chg->hv_tries >= HV_TRIES || !have_pd)
++		goto restore;
++	if (s.n) {
++		chg->hv_tries++;
++		i = pd_pick(&s);
++		if (i == cur) {
++			pd_apply(chg, &s, cur);
++			return;
++		}
++		if (!chg_ovpsel_ok(chg))
++			return;
++		/* lower the input limit first when the new PDO allows less (sec_battery.c:856-864) */
++		if (pdo_ma(s.pdo[i]) < chg->input_ma && chg_set(chg, pdo_ma(s.pdo[i]), chg->charge_ma, chg->mv))
++			return;
++		chg->hv = HV_PD_WAIT;
++		chg->pdo = i;
++		chg->hv_polls = 0;
++		dev_info(&chg->client->dev, "PD: requesting PDO %d (%u mV, %u mA)\n", i, pdo_mv(s.pdo[i]), pdo_ma(s.pdo[i]));
++		if (pd_select(chg, i))
++			hv_fallback(chg, "PDO select failed");
++		return;
++	}
++	/* AFC only on a legacy Rp 56k source without shorts or water, "to prevent damage by RP0 cable" (muic_task.c:260-264) */
++	if (chg->src == SRC_DCP && (s.fs & FS_ATTACH_DONE) && !(s.fs & FS_IS_SOURCE) && FIELD_GET(FS_RP_LVL, s.fs) == 1 &&
++	    !(s.fs & FS_SHORT) && !(s.lp & LP_WATER) && chg_ovpsel_ok(chg)) {
++		chg->hv_tries++;
++		afc_start(chg);
++		return;
++	}
++restore:
++	if (chg->hv == HV_OFF && (chg->input_ma != src_ma[chg->src].input_ma || chg->charge_ma != src_ma[chg->src].charge_ma))
++		chg_set(chg, src_ma[chg->src].input_ma, src_ma[chg->src].charge_ma, 5000);
++}
++
++/* VBUS for a sink on the Type-C port: only without VBUS, like psy_chg_set_charge_otg_control (sm5705_charger.c:684-706) */
++static void otg_stop(struct sm5705_chg *chg);
++
++static int otg_start(struct sm5705_chg *chg)
++{
++	struct device *dev = &chg->client->dev;
++	int ret = i2c_smbus_read_byte_data(chg->client, REG_STATUS1);
++
++	if (ret < 0)
++		return ret;
++	if (ret & STATUS1_VBUSPOK) {
++		dev_warn(dev, "VBUS present, OTG boost not started\n");
++		return -EBUSY;
++	}
++	/* D+/D- to the AP USB PHY by hand (attach_otg_usb, muic_apis.c:588-612): automatic switching would run BC1.2 on our VBUS */
++	ret = i2c_smbus_read_byte_data(chg->muic, MUIC_CTRL);
++	if (ret < 0)
++		return ret;
++	chg->muic_ctrl = ret;
++	ret = i2c_smbus_write_byte_data(chg->muic, MUIC_MANSW1, MANSW1_USB);
++	if (!ret)
++		ret = i2c_smbus_write_byte_data(chg->muic, MUIC_CTRL, chg->muic_ctrl & ~CTRL_AUTO_SW);
++	/* the stock USB_OTG row: 5.1 V boost, 1.5 A limit */
++	if (!ret)
++		ret = reg_update(chg->client, REG_FLEDCNTL6, FLEDCNTL6_BST_MASK, BST_5100MV);
++	if (!ret)
++		ret = reg_update(chg->client, REG_CHGCNTL6, CHGCNTL6_OTG_MASK, OTG_1500MA);
++	if (!ret) {
++		chg->otg_on = true;
++		ret = chg_apply_mode(chg, false);
++	}
++	if (ret) {
++		otg_stop(chg);
++		return ret;
++	}
++	dev_info(dev, "OTG boost on (5.1 V, 1.5 A limit), MUIC CTRL %02x -> manual USB\n", chg->muic_ctrl);
++	return 0;
++}
++
++static void otg_stop(struct sm5705_chg *chg)
++{
++	if (chg->otg_on) {
++		chg->otg_on = false;
++		/* USB_OTG -> CHG_ON through 100 ms of SUSPEND "for BAT_REG stabilize" (sm5705_charger_oper.c:147-155) */
++		chg_set_mode(chg, CNTL_MODE_SUSPEND);
++		msleep(100);
++		chg->otg_holdoff = true;
++		dev_info(&chg->client->dev, "OTG boost off\n");
++	}
++	reg_update(chg->client, REG_CHGCNTL6, CHGCNTL6_OTG_MASK, OTG_500MA);
++	reg_update(chg->client, REG_FLEDCNTL6, FLEDCNTL6_BST_MASK, BST_4500MV);
++	chg_apply_mode(chg, false);
++	/* switches open and automatic switching again (detach_otg_usb, muic_apis.c:614-634) */
++	if (chg->muic_ctrl >= 0) {
++		i2c_smbus_write_byte_data(chg->muic, MUIC_MANSW1, MANSW1_OPEN);
++		i2c_smbus_write_byte_data(chg->muic, MUIC_CTRL, chg->muic_ctrl | CTRL_AUTO_SW);
++		chg->muic_ctrl = -1;
++	}
++}
++
++/* OTGFAIL (boost over current / VBUS short): the stock IRQ (sm5705_charger.c:1489-1512) takes the "otg" psy offline */
++static bool otg_check(struct sm5705_chg *chg)
++{
++	int st3 = i2c_smbus_read_byte_data(chg->client, REG_STATUS3);
++
++	if (st3 < 0 || !(st3 & STATUS3_OTGFAIL))
++		return false;
++	dev_err(&chg->client->dev, "OTG boost failed (STATUS3 %02x), VBUS off\n", st3);
++	otg_stop(chg);
++	return true;
++}
++
++static void chg_work(struct work_struct *work)
++{
++	struct sm5705_chg *chg = container_of(work, struct sm5705_chg, work.work);
++	int st, src, old_src, hv, input_ma, mv;
++	bool otg_failed = false, awake;
++
++	mutex_lock(&chg->lock);
++	/* while the boost drives VBUS, VBUSPOK and the MUIC see our own 5 V: no source detection, no charging */
++	if (chg->otg_on) {
++		otg_failed = otg_check(chg);
++		goto out;
++	}
++	if (chg->otg_holdoff) {
++		chg->otg_holdoff = false;
++		goto out;
++	}
++	st = i2c_smbus_read_byte_data(chg->client, REG_STATUS1);
++	src = old_src = chg->src;
++	hv = chg->hv;
++	input_ma = chg->input_ma;
++	mv = chg->mv;
++	if (st < 0)
++		goto out;
++	if (!(st & STATUS1_VBUSPOK)) {
++		if (chg->hv == HV_AFC_DETECT || chg->hv == HV_AFC)
++			afc_to_5v(chg);
++		chg->hv = HV_OFF;
++		chg->pdo = 0;
++		chg->hv_tries = 0;
++		src = SRC_NONE;
++		chg->bc12_polls = 0;
++	} else if (chg->src == SRC_NONE) {
++		int type = i2c_smbus_read_byte_data(chg->muic, MUIC_CHGTYPE);
++
++		if (type == CHGTYPE_DCP)
++			src = SRC_DCP;
++		else if (type == CHGTYPE_CDP)
++			src = SRC_CDP;
++		else if (type > 0 || ++chg->bc12_polls >= BC12_POLLS)
++			src = SRC_SDP;
++	}
++	if (src != chg->src) {
++		chg->src = src;
++		if (chg_set(chg, src_ma[src].input_ma, src_ma[src].charge_ma, 5000))
++			dev_warn(&chg->client->dev, "cannot set the charge currents\n");
++		dev_info(&chg->client->dev, "source %s: input %d mA, charge %d mA\n",
++			 (const char *[]){ "none", "PC port", "CDP", "wall adapter" }[src], src_ma[src].input_ma, src_ma[src].charge_ma);
++	} else if (src != SRC_NONE) {
++		hv_poll(chg, st);
++	}
++	awake = pc_port_awake && (chg->src == SRC_SDP || chg->src == SRC_CDP);
++	if (awake != chg->awake) {
++		chg->awake = awake;
++		if (awake)
++			pm_stay_awake(&chg->client->dev);
++		else
++			pm_relax(&chg->client->dev);
++	}
++	if (old_src != chg->src || hv != chg->hv || input_ma != chg->input_ma || mv != chg->mv) {
++		power_supply_changed(chg->usb);
++		power_supply_changed(chg->ac);
++	}
++out:
++	mutex_unlock(&chg->lock);
++	/* outside the lock: a consumer may disable the regulator from its notifier */
++	if (otg_failed && chg->otg)
++		regulator_notifier_call_chain(chg->otg, REGULATOR_EVENT_OVER_CURRENT, NULL);
++	schedule_delayed_work(&chg->work, msecs_to_jiffies(POLL_MS));
++}
++
++static int otg_enable(struct regulator_dev *rdev)
++{
++	struct sm5705_chg *chg = rdev_get_drvdata(rdev);
++
++	guard(mutex)(&chg->lock);
++	return chg->otg_on ? 0 : otg_start(chg);
++}
++
++static int otg_disable(struct regulator_dev *rdev)
++{
++	struct sm5705_chg *chg = rdev_get_drvdata(rdev);
++
++	guard(mutex)(&chg->lock);
++	otg_stop(chg);
++	return 0;
++}
++
++static int otg_is_enabled(struct regulator_dev *rdev)
++{
++	struct sm5705_chg *chg = rdev_get_drvdata(rdev);
++
++	return READ_ONCE(chg->otg_on);
++}
++
++static const struct regulator_ops otg_ops = {
++	.enable = otg_enable,
++	.disable = otg_disable,
++	.is_enabled = otg_is_enabled,
++};
++
++static const struct regulator_desc otg_desc = {
++	.name = "usb-otg-vbus",
++	.of_match = "usb-otg-vbus",	/* child node of the charger */
++	.type = REGULATOR_VOLTAGE,
++	.owner = THIS_MODULE,
++	.ops = &otg_ops,
++	.n_voltages = 1,
++	.fixed_uV = 5100000,
++};
++
++static int torch_set(struct led_classdev *led, enum led_brightness b)
++{
++	struct sm5705_chg *chg = container_of(led, struct sm5705_chg, torch);
++	struct i2c_client *c = chg->client;
++	int ret;
++
++	guard(mutex)(&chg->lock);
++	if (b) {
++		/* as the stock driver: current, timer, pins, then the external-control mode (and the boost when running from the battery) */
++		ret = i2c_smbus_write_byte_data(c, REG_FLED1CNTL4, (TORCH_MA - 10) / 10);
++		if (!ret)
++			ret = i2c_smbus_write_byte_data(c, REG_FLED1CNTL2, 0x04);
++		/* with the OTG boost on, the torch runs from its 5.1 V (stock table row torch + otg) */
++		if (!ret && !chg->otg_on)
++			ret = i2c_smbus_write_byte_data(c, REG_FLEDCNTL6, 0x05);
++		if (ret)
++			return ret;
++		chg->torch_on = true;
++		gpiod_set_value_cansleep(chg->flash_gpio, 0);
++		gpiod_set_value_cansleep(chg->torch_gpio, 1);
++		ret = i2c_smbus_write_byte_data(c, REG_FLED1CNTL1, FLED_EXTERNAL);
++		if (ret)
++			return ret;
++		ret = i2c_smbus_read_byte_data(c, REG_STATUS1);
++		return ret < 0 ? ret : chg_apply_mode(chg, ret & STATUS1_VBUSPOK);
++	}
++	chg->torch_on = false;
++	gpiod_set_value_cansleep(chg->torch_gpio, 0);
++	ret = i2c_smbus_write_byte_data(c, REG_FLED1CNTL1, 0);
++	return ret ?: chg_apply_mode(chg, false);
++}
++
++static int chg_get_property(struct power_supply *psy, enum power_supply_property psp, union power_supply_propval *val)
++{
++	struct sm5705_chg *chg = power_supply_get_drvdata(psy);
++	bool ac_src = chg->src == SRC_DCP || chg->hv == HV_PD;
++	bool online = psy == chg->ac ? ac_src : !ac_src && (chg->src == SRC_SDP || chg->src == SRC_CDP);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		val->intval = online;
++		return 0;
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++	case POWER_SUPPLY_PROP_CURRENT_MAX:	/* Android's BatteryService: charger wattage = current_max * voltage_max */
++		val->intval = online ? chg->input_ma * 1000 : 0;
++		return 0;
++	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
++		val->intval = online ? chg->mv * 1000 : 0;
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		val->intval = online ? chg->charge_ma * 1000 : 0;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const enum power_supply_property chg_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CURRENT_MAX,
++	POWER_SUPPLY_PROP_VOLTAGE_MAX,
++};
++
++static char *chg_supplied_to[] = { "battery" };
++
++static const struct power_supply_desc usb_desc = {
++	.name = "sm5705-usb",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.properties = chg_props,
++	.num_properties = ARRAY_SIZE(chg_props),
++	.get_property = chg_get_property,
++};
++
++static const struct power_supply_desc ac_desc = {
++	.name = "sm5705-ac",
++	.type = POWER_SUPPLY_TYPE_MAINS,
++	.properties = chg_props,
++	.num_properties = ARRAY_SIZE(chg_props),
++	.get_property = chg_get_property,
++};
++
++static void chg_put_pd(void *pd)
++{
++	put_device(&((struct i2c_client *)pd)->dev);
++}
++
++static int chg_probe(struct i2c_client *client)
++{
++	struct power_supply_config cfg = { };
++	struct device_node *np;
++	struct sm5705_chg *chg;
++	int ret;
++
++	chg = devm_kzalloc(&client->dev, sizeof(*chg), GFP_KERNEL);
++	if (!chg)
++		return -ENOMEM;
++	chg->client = client;
++	chg->src = SRC_NONE;
++	chg->mv = 5000;
++	chg->muic_ctrl = -1;
++	i2c_set_clientdata(client, chg);
++	ret = devm_mutex_init(&client->dev, &chg->lock);
++	if (ret)
++		return ret;
++
++	ret = i2c_smbus_read_byte_data(client, REG_CNTL);
++	if (ret < 0)
++		return dev_err_probe(&client->dev, ret, "charger does not answer\n");
++	chg->muic = devm_i2c_new_dummy_device(&client->dev, client->adapter, MUIC_ADDR);
++	if (IS_ERR(chg->muic))
++		return PTR_ERR(chg->muic);
++
++	np = of_parse_phandle(client->dev.of_node, "samsung,pdic", 0);
++	if (np) {
++		chg->pd = of_find_i2c_device_by_node(np);
++		of_node_put(np);
++		if (!chg->pd)
++			return dev_err_probe(&client->dev, -EPROBE_DEFER, "PD controller not registered yet\n");
++		ret = devm_add_action_or_reset(&client->dev, chg_put_pd, chg->pd);
++		if (ret)
++			return ret;
++	}
++
++	cfg.drv_data = chg;
++	cfg.supplied_to = chg_supplied_to;
++	cfg.num_supplicants = ARRAY_SIZE(chg_supplied_to);
++	chg->usb = devm_power_supply_register(&client->dev, &usb_desc, &cfg);
++	if (IS_ERR(chg->usb))
++		return PTR_ERR(chg->usb);
++	chg->ac = devm_power_supply_register(&client->dev, &ac_desc, &cfg);
++	if (IS_ERR(chg->ac))
++		return PTR_ERR(chg->ac);
++
++	ret = devm_delayed_work_autocancel(&client->dev, &chg->work, chg_work);
++	if (ret)
++		return ret;
++	ret = devm_device_init_wakeup(&client->dev);
++	if (ret)
++		return ret;
++
++	/* optional camera flash LED as a torch: both pins are on the GPIO expander (probe defers until it is there) */
++	chg->torch_gpio = devm_gpiod_get_optional(&client->dev, "torch", GPIOD_OUT_LOW);
++	chg->flash_gpio = devm_gpiod_get_optional(&client->dev, "flash", GPIOD_OUT_LOW);
++	if (IS_ERR(chg->torch_gpio) || IS_ERR(chg->flash_gpio))
++		return dev_err_probe(&client->dev, PTR_ERR(IS_ERR(chg->torch_gpio) ? chg->torch_gpio : chg->flash_gpio), "torch/flash gpio\n");
++	if (chg->torch_gpio && chg->flash_gpio) {
++		chg->torch.name = "white:torch";
++		chg->torch.max_brightness = 1;
++		chg->torch.brightness_set_blocking = torch_set;
++		if (devm_led_classdev_register(&client->dev, &chg->torch))
++			dev_warn(&client->dev, "torch LED not registered\n");
++	}
++
++	/* optional Type-C VBUS (OTG boost) regulator, only with its DT child (its constraints allow the status change) */
++	np = of_get_child_by_name(client->dev.of_node, "usb-otg-vbus");
++	if (np) {
++		struct regulator_config rcfg = { .dev = &client->dev, .driver_data = chg };
++
++		of_node_put(np);
++		chg->otg = devm_regulator_register(&client->dev, &otg_desc, &rcfg);
++		if (IS_ERR(chg->otg))
++			return dev_err_probe(&client->dev, PTR_ERR(chg->otg), "OTG VBUS regulator\n");
++	}
++	schedule_delayed_work(&chg->work, 0);
++	return 0;
++}
++
++/* leave the source at 5 V and the boost off across reboot and unbind */
++static void chg_stop(struct i2c_client *client)
++{
++	struct sm5705_chg *chg = i2c_get_clientdata(client);
++
++	cancel_delayed_work_sync(&chg->work);
++	guard(mutex)(&chg->lock);
++	if (chg->otg_on)
++		otg_stop(chg);
++	if (chg->hv != HV_OFF)
++		hv_fallback(chg, "shutdown");
++}
++
++static const struct of_device_id chg_of_match[] = {
++	{ .compatible = "samsung,sm5705-chg-t545" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, chg_of_match);
++
++static struct i2c_driver chg_driver = {
++	.driver = {
++		.name = "sm5705-chg-t545",
++		.of_match_table = chg_of_match,
++	},
++	.probe = chg_probe,
++	.remove = chg_stop,
++	.shutdown = chg_stop,
++};
++module_i2c_driver(chg_driver);
++
++MODULE_DESCRIPTION("SM5705 charger of the SM-T545");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/power/supply/sm5705-fg-t545.c b/drivers/power/supply/sm5705-fg-t545.c
+new file mode 100644
+index 000000000..e141d42a8
+--- /dev/null
++++ b/drivers/power/supply/sm5705-fg-t545.c
+@@ -0,0 +1,193 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Silicon Mitus SM5705 fuel gauge of the Samsung Galaxy Tab Active Pro (SM-T545), read-only power_supply "battery".
++ * Register formats are the ones of Samsung's sm5705_fuelgauge driver (16 bit little-endian SMBus words); the gauge keeps
++ * its own calibration/learning data, nothing is written to it here.
++ */
++
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/power_supply.h>
++
++#define SM5705_REG_DEVICE_ID	0x00
++#define SM5705_REG_SOC		0x05
++#define SM5705_REG_OCV		0x06
++#define SM5705_REG_VOLTAGE	0x07
++#define SM5705_REG_CURRENT	0x08
++#define SM5705_REG_TEMPERATURE	0x09
++
++struct sm5705_fg {
++	struct i2c_client *client;
++	struct power_supply *psy;
++};
++
++static int fg_word(struct sm5705_fg *fg, u8 reg)
++{
++	return i2c_smbus_read_word_data(fg->client, reg);
++}
++
++static int fg_soc_permille(struct sm5705_fg *fg)
++{
++	int w = fg_word(fg, SM5705_REG_SOC);
++
++	if (w < 0)
++		return w;
++	return ((w & 0xff00) >> 8) * 10 + (((w & 0x00ff) * 10) / 256);
++}
++
++static int fg_voltage_mv(struct sm5705_fg *fg, u8 reg, u16 int_mask)
++{
++	int w = fg_word(fg, reg);
++
++	if (w < 0)
++		return w;
++	return (((w & int_mask) >> 11) * 1000) + (((w & 0x07ff) * 1000) / 2048);
++}
++
++static int fg_current_ma(struct sm5705_fg *fg, int *ma)
++{
++	int w = fg_word(fg, SM5705_REG_CURRENT);
++
++	if (w < 0)
++		return w;
++	*ma = (((w & 0x1800) >> 11) * 1000) + (((w & 0x07ff) * 1000) / 2048);
++	if (w & 0x8000)
++		*ma = -*ma;	/* negative = discharging */
++	return 0;
++}
++
++static int fg_temp_decic(struct sm5705_fg *fg)
++{
++	int w = fg_word(fg, SM5705_REG_TEMPERATURE), t;
++
++	if (w < 0)
++		return w;
++	t = (((w & 0x7f00) >> 8) * 10) + (((w & 0x00f0) * 10) / 256);
++	return (w & 0x8000) ? -t : t;
++}
++
++static int fg_get_property(struct power_supply *psy, enum power_supply_property psp,
++			   union power_supply_propval *val)
++{
++	struct sm5705_fg *fg = power_supply_get_drvdata(psy);
++	int ret, soc, ma;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_PRESENT:
++		val->intval = 1;
++		return 0;
++	case POWER_SUPPLY_PROP_TECHNOLOGY:
++		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
++		return 0;
++	case POWER_SUPPLY_PROP_HEALTH:
++		val->intval = POWER_SUPPLY_HEALTH_GOOD;
++		return 0;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		soc = fg_soc_permille(fg);
++		if (soc < 0)
++			return soc;
++		val->intval = clamp(soc / 10, 0, 100);
++		return 0;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = fg_voltage_mv(fg, SM5705_REG_VOLTAGE, 0x3800);
++		if (ret < 0)
++			return ret;
++		val->intval = ret * 1000;
++		return 0;
++	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
++		ret = fg_voltage_mv(fg, SM5705_REG_OCV, 0x7800);
++		if (ret < 0)
++			return ret;
++		val->intval = ret * 1000;
++		return 0;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		ret = fg_current_ma(fg, &ma);
++		if (ret)
++			return ret;
++		val->intval = ma * 1000;
++		return 0;
++	case POWER_SUPPLY_PROP_TEMP:
++		ret = fg_temp_decic(fg);
++		if (ret < -2000)
++			return ret;
++		val->intval = ret;
++		return 0;
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = fg_current_ma(fg, &ma);
++		if (ret)
++			return ret;
++		soc = fg_soc_permille(fg);
++		/* plugged in = one of the sm5705-chg-t545 supplies is online; the charger runs then, even if a weak PC port leaves the net
++		 * current near zero (what the stock firmware reports as well) */
++		if (power_supply_am_i_supplied(psy) <= 0)
++			val->intval = ma > 30 ? POWER_SUPPLY_STATUS_CHARGING : POWER_SUPPLY_STATUS_DISCHARGING;
++		else if (soc >= 990)
++			val->intval = POWER_SUPPLY_STATUS_FULL;
++		else
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const enum power_supply_property fg_props[] = {
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_VOLTAGE_OCV,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_TEMP,
++};
++
++static const struct power_supply_desc fg_desc = {
++	.name = "battery",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = fg_props,
++	.num_properties = ARRAY_SIZE(fg_props),
++	.get_property = fg_get_property,
++};
++
++static int fg_probe(struct i2c_client *client)
++{
++	struct power_supply_config cfg = { };
++	struct sm5705_fg *fg;
++	int id;
++
++	fg = devm_kzalloc(&client->dev, sizeof(*fg), GFP_KERNEL);
++	if (!fg)
++		return -ENOMEM;
++	fg->client = client;
++	cfg.drv_data = fg;
++	cfg.fwnode = dev_fwnode(&client->dev);
++
++	id = fg_word(fg, SM5705_REG_DEVICE_ID);
++	if (id < 0)
++		return dev_err_probe(&client->dev, id, "gauge does not answer\n");
++	dev_info(&client->dev, "SM5705 fuel gauge id 0x%04x\n", id);
++
++	fg->psy = devm_power_supply_register(&client->dev, &fg_desc, &cfg);
++	return PTR_ERR_OR_ZERO(fg->psy);
++}
++
++static const struct of_device_id fg_of_match[] = {
++	{ .compatible = "samsung,sm5705-fg-t545" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, fg_of_match);
++
++static struct i2c_driver fg_driver = {
++	.driver = {
++		.name = "sm5705-fg-t545",
++		.of_match_table = fg_of_match,
++	},
++	.probe = fg_probe,
++};
++module_i2c_driver(fg_driver);
++
++MODULE_DESCRIPTION("SM5705 fuel gauge of the SM-T545");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/usb/gadget/Makefile b/drivers/usb/gadget/Makefile
+index 33f1ef91b..a2490f6ca 100644
+--- a/drivers/usb/gadget/Makefile
++++ b/drivers/usb/gadget/Makefile
+@@ -10,3 +10,4 @@ libcomposite-y			:= usbstring.o config.o epautoconf.o
+ libcomposite-y			+= composite.o functions.o configfs.o u_f.o
+ 
+ obj-$(CONFIG_USB_GADGET)	+= udc/ function/ legacy/
++obj-$(CONFIG_USB_CONFIGFS)	+= t545-android-usb.o
+diff --git a/drivers/usb/gadget/t545-android-usb.c b/drivers/usb/gadget/t545-android-usb.c
+new file mode 100644
+index 000000000..942172e12
+--- /dev/null
++++ b/drivers/usb/gadget/t545-android-usb.c
+@@ -0,0 +1,47 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Android's UsbService creates its UsbDeviceManager (USB modes in Settings, the adb authorisation flow, "USB debugging connected")
++ * only when /sys/class/android_usb exists. The Android common kernel creates that class from its configfs gadget hooks; mainline has
++ * none, so Settings > USB crashed in UsbManager.getCurrentFunctions ("USB device mode not supported"). Stand-in: class android_usb
++ * with device android0 (DEVPATH /devices/virtual/android_usb/android0, the path UsbDeviceManager's uevent observer matches).
++ * shortcut: "state" is always CONFIGURED and no state uevents are sent; hook the composite driver's connect/disconnect when the
++ * USB notification and charging-only mode have to follow the cable.
++ */
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/init.h>
++#include <linux/kdev_t.h>
++#include <linux/sysfs.h>
++
++static ssize_t state_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "CONFIGURED\n");
++}
++static DEVICE_ATTR_RO(state);
++
++static struct attribute *android_usb_attrs[] = {
++	&dev_attr_state.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(android_usb);
++
++static const struct class android_usb_class = {
++	.name = "android_usb",
++};
++
++static int __init t545_android_usb_init(void)
++{
++	struct device *dev;
++	int ret;
++
++	ret = class_register(&android_usb_class);
++	if (ret)
++		return ret;
++	dev = device_create_with_groups(&android_usb_class, NULL, MKDEV(0, 0), NULL, android_usb_groups, "android0");
++	if (IS_ERR(dev)) {
++		class_unregister(&android_usb_class);
++		return PTR_ERR(dev);
++	}
++	return 0;
++}
++late_initcall(t545_android_usb_init);
+diff --git a/drivers/usb/typec/Kconfig b/drivers/usb/typec/Kconfig
+index 2f80c2792..a2d1b65b0 100644
+--- a/drivers/usb/typec/Kconfig
++++ b/drivers/usb/typec/Kconfig
+@@ -88,6 +88,15 @@ config TYPEC_HD3SS3220
+ 	  If you choose to build this driver as a dynamically linked module, the
+ 	  module will be called hd3ss3220.ko.
+ 
++config TYPEC_S2MM005_T545
++	tristate "Samsung S2MM005 Type-C controller of the SM-T545"
++	depends on I2C
++	depends on USB_ROLE_SWITCH
++	depends on REGULATOR
++	help
++	  Attach state, data role and VBUS of the Type-C port of the Galaxy Tab Active Pro (SM-T545). The S2MM005 firmware
++	  does the CC detection and PD by itself; this driver follows it, switches the DWC3 role and the SM5705 OTG boost.
++
+ config TYPEC_STUSB160X
+ 	tristate "STMicroelectronics STUSB160x Type-C controller driver"
+ 	depends on USB_ROLE_SWITCH || !USB_ROLE_SWITCH
+diff --git a/drivers/usb/typec/Makefile b/drivers/usb/typec/Makefile
+index 7a368fea6..55a18d183 100644
+--- a/drivers/usb/typec/Makefile
++++ b/drivers/usb/typec/Makefile
+@@ -8,6 +8,7 @@ obj-$(CONFIG_TYPEC_UCSI)	+= ucsi/
+ obj-$(CONFIG_TYPEC_TPS6598X)	+= tipd/
+ obj-$(CONFIG_TYPEC_ANX7411)	+= anx7411.o
+ obj-$(CONFIG_TYPEC_HD3SS3220)	+= hd3ss3220.o
++obj-$(CONFIG_TYPEC_S2MM005_T545)	+= s2mm005-t545.o
+ obj-$(CONFIG_TYPEC_STUSB160X) 	+= stusb160x.o
+ obj-$(CONFIG_TYPEC_RT1719)	+= rt1719.o
+ obj-$(CONFIG_TYPEC_WUSB3801)	+= wusb3801.o
+diff --git a/drivers/usb/typec/s2mm005-t545.c b/drivers/usb/typec/s2mm005-t545.c
+new file mode 100644
+index 000000000..c56fd2191
+--- /dev/null
++++ b/drivers/usb/typec/s2mm005-t545.c
+@@ -0,0 +1,380 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung S2MM005 USB Type-C / PD controller of the SM-T545 (Galaxy Tab Active Pro), minimal mainline driver.
++ *
++ * The S2MM005 runs its own flash firmware: CC detection, DRP toggling and the PD negotiation happen inside the chip, which
++ * raises its interrupt (tlmm gpio38, falling edge) and leaves the state in SRAM read over I2C (16-bit big-endian address,
++ * little-endian words). Like Samsung's drivers/ccic/s2mm005_cc.c process_cc_attach() this driver only follows the attach:
++ *  - the chip is the source (partner = sink, e.g. a USB stick): VBUS on (connector "vbus-supply" = the SM5705 OTG boost),
++ *    then the DWC3 role switch to host;
++ *  - the chip is the sink (PC, charger): role device;
++ *  - detach: VBUS off, role none (DWC3 goes back to its default role, peripheral).
++ * No role swaps, no alternate modes, no firmware update. Fast charging (PDO select) stays in sm5705-chg-t545, which talks to
++ * the same chip through this client. Source of every register: Samsung 4.9 tree, file:line.
++ */
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/property.h>
++#include <linux/regulator/consumer.h>
++#include <linux/usb/role.h>
++#include <linux/usb/typec.h>
++
++#define REG_DUMMY		0x0008	/* read first, wakes the controller (s2mm005_cc.c:691-694) */
++#define REG_CMD			0x0010	/* I2C_SLV_CMD (include/linux/ccic/s2mm005.h:46) */
++#define REG_FUNC_STATE		0x0020	/* s2mm005.h:176-198 */
++#define REG_INT_STATUS		0x0030	/* 48 bytes, read before the clear (s2mm005_cc.c:1142-1166) */
++#define REG_LP_STATE		0x0060	/* s2mm005.h:203-219 */
++
++#define CMD_INT_CLEAR		0x01	/* s2mm005_int_clear (s2mm005.c:275-280) */
++#define CMD_MANUAL_LPM		0x0f	/* + mode byte (s2mm005_manual_LPM, s2mm005.c:428-449) */
++#define LPM_AUTO_ENABLE		0x06	/* after a controller reset (s2mm005_cc.c:807-813) */
++#define LPM_SLEEP_CABLE		0x0d	/* s2mm005_cc.c:815-818 */
++
++#define FS_PD_STATE		GENMASK(7, 0)
++#define FS_ATTACH_DONE		BIT(24)
++#define FS_IS_SOURCE		BIT(25)
++#define FS_IS_DFP		BIT(26)
++#define FS_RP_LVL		GENMASK(28, 27)	/* 1 = 56k (default USB), 2 = 22k (1.5 A), 3 = 10k (3 A) (s2mm005.h:800-804) */
++#define FS_RESET		BIT(31)
++#define LP_AUTO_LP		BIT(0)
++#define LP_WATER		BIT(3)
++#define LP_RUN_DRY		BIT(5)
++#define LP_SLEEP_CABLE		BIT(8)
++
++/* policy engine states (s2mm005.h:733-772) */
++#define PE_DETACHED		0
++#define PE_SRC_SEND_CAPS	3
++#define PE_SRC_DISABLED		7
++#define PE_SRC_READY		6
++#define PE_SRC_WAIT_NEW_CAPS	14
++#define PE_SNK_WAIT_CAPS	17
++#define PE_SNK_EVAL_CAPS	18
++#define PE_SNK_READY		21
++#define PE_ERROR_RECOVERY	29
++
++static bool ignore_moisture;
++module_param(ignore_moisture, bool, 0644);
++MODULE_PARM_DESC(ignore_moisture, "follow the attach even when the controller reports water or not RUN_DRY (bring-up only)");
++
++struct s2mm005 {
++	struct i2c_client *client;
++	struct mutex lock;		/* IRQ thread and probe */
++	struct typec_port *port;
++	struct typec_partner *partner;
++	struct usb_role_switch *role_sw;
++	struct regulator *vbus;		/* NULL: no VBUS control */
++	struct fwnode_handle *connector;
++	enum usb_role role;
++	bool vbus_on;
++	bool water;
++};
++
++static int s2mm_read(struct s2mm005 *s, u16 reg, void *buf, u16 len)
++{
++	u8 addr[2] = { reg >> 8, reg & 0xff };
++	struct i2c_msg msg[2] = {
++		{ .addr = s->client->addr, .len = 2, .buf = addr },
++		{ .addr = s->client->addr, .flags = I2C_M_RD, .len = len, .buf = buf },
++	};
++	int ret = i2c_transfer(s->client->adapter, msg, 2);
++
++	return ret == 2 ? 0 : ret < 0 ? ret : -EIO;
++}
++
++static int s2mm_cmd(struct s2mm005 *s, const u8 *cmd, int len)
++{
++	u8 buf[4] = { REG_CMD >> 8, REG_CMD & 0xff };
++	int ret;
++
++	memcpy(&buf[2], cmd, len);
++	ret = i2c_master_send(s->client, buf, len + 2);
++	return ret == len + 2 ? 0 : ret < 0 ? ret : -EIO;
++}
++
++static void s2mm_lpm(struct s2mm005 *s, u8 mode)
++{
++	u8 cmd[] = { CMD_MANUAL_LPM, mode };
++	u8 dummy;
++	int i;
++
++	for (i = 0; i < 5; i++)		/* the stock wakes the controller with five dummy reads first */
++		s2mm_read(s, REG_DUMMY, &dummy, 1);
++	udelay(10);
++	if (s2mm_cmd(s, cmd, sizeof(cmd)))
++		dev_warn(&s->client->dev, "manual LPM %#x failed\n", mode);
++}
++
++static void s2mm_vbus(struct s2mm005 *s, bool on)
++{
++	int ret;
++
++	if (!s->vbus || s->vbus_on == on)
++		return;
++	ret = on ? regulator_enable(s->vbus) : regulator_disable(s->vbus);
++	if (ret) {
++		/* e.g. -EBUSY: someone else already drives VBUS; the host role still works then */
++		dev_warn(&s->client->dev, "VBUS %s failed: %d\n", on ? "on" : "off", ret);
++		return;
++	}
++	s->vbus_on = on;
++}
++
++static void s2mm_partner(struct s2mm005 *s, bool attached, bool pd)
++{
++	struct typec_partner_desc desc = { .usb_pd = pd, .accessory = TYPEC_ACCESSORY_NONE };
++
++	if (attached && !s->partner) {
++		s->partner = typec_register_partner(s->port, &desc);
++		if (IS_ERR(s->partner)) {
++			dev_warn(&s->client->dev, "partner not registered: %pe\n", s->partner);
++			s->partner = NULL;
++		}
++	} else if (!attached && s->partner) {
++		typec_unregister_partner(s->partner);
++		s->partner = NULL;
++	}
++}
++
++/* the order of process_cc_attach (s2mm005_cc.c:836-1000): old role down, 300 ms, VBUS, new role */
++static void s2mm_set_role(struct s2mm005 *s, enum usb_role role, u32 fs)
++{
++	int pd_state = FIELD_GET(FS_PD_STATE, fs);
++	bool pd = pd_state == PE_SRC_READY || pd_state == PE_SNK_READY;
++
++	if (role == s->role) {
++		if (role != USB_ROLE_NONE && pd)
++			typec_set_pwr_opmode(s->port, TYPEC_PWR_MODE_PD);
++		return;
++	}
++	dev_info(&s->client->dev, "%s -> %s (PD state %d, func state %08x)\n", usb_role_string(s->role), usb_role_string(role),
++		 pd_state, fs);
++	if (s->role != USB_ROLE_NONE && role != USB_ROLE_NONE) {
++		/* source <-> sink without a detach: drop the old role first like the stock */
++		usb_role_switch_set_role(s->role_sw, USB_ROLE_NONE);
++		s2mm_vbus(s, false);
++		msleep(300);
++	}
++	switch (role) {
++	case USB_ROLE_HOST:
++		s2mm_partner(s, true, pd);
++		typec_set_pwr_role(s->port, TYPEC_SOURCE);
++		typec_set_data_role(s->port, TYPEC_HOST);
++		typec_set_pwr_opmode(s->port, pd ? TYPEC_PWR_MODE_PD : TYPEC_PWR_MODE_USB);
++		s2mm_vbus(s, true);
++		break;
++	case USB_ROLE_DEVICE:
++		s2mm_vbus(s, false);
++		s2mm_partner(s, true, pd);
++		typec_set_pwr_role(s->port, TYPEC_SINK);
++		typec_set_data_role(s->port, TYPEC_DEVICE);
++		typec_set_pwr_opmode(s->port, pd ? TYPEC_PWR_MODE_PD :
++				     FIELD_GET(FS_RP_LVL, fs) == 3 ? TYPEC_PWR_MODE_3_0A :
++				     FIELD_GET(FS_RP_LVL, fs) == 2 ? TYPEC_PWR_MODE_1_5A : TYPEC_PWR_MODE_USB);
++		break;
++	default:
++		s2mm_vbus(s, false);
++		s2mm_partner(s, false, false);
++		typec_set_pwr_role(s->port, TYPEC_SINK);
++		typec_set_data_role(s->port, TYPEC_DEVICE);
++		typec_set_pwr_opmode(s->port, TYPEC_PWR_MODE_USB);
++		break;
++	}
++	usb_role_switch_set_role(s->role_sw, role);
++	s->role = role;
++}
++
++static void s2mm_update(struct s2mm005 *s)
++{
++	struct device *dev = &s->client->dev;
++	__le32 w;
++	u32 fs, lp;
++	u8 dummy;
++	int pd_state;
++
++	s2mm_read(s, REG_DUMMY, &dummy, 1);
++	if (s2mm_read(s, REG_LP_STATE, &w, 4))
++		return;
++	lp = le32_to_cpu(w);
++	if (s2mm_read(s, REG_FUNC_STATE, &w, 4))
++		return;
++	fs = le32_to_cpu(w);
++	pd_state = FIELD_GET(FS_PD_STATE, fs);
++	dev_dbg(dev, "func state %08x lp state %08x\n", fs, lp);
++
++	/* moisture: the stock handles attach only while dry (s2mm005_cc.c:760-776); no VBUS into a wet port */
++	if (((lp & LP_WATER) || !(lp & LP_RUN_DRY)) && !ignore_moisture) {
++		if (!s->water)
++			dev_warn(dev, "moisture reported (lp state %08x): port off\n", lp);
++		s->water = true;
++		s2mm_set_role(s, USB_ROLE_NONE, fs);
++		return;
++	}
++	if (s->water)
++		dev_info(dev, "port dry again\n");
++	s->water = false;
++
++	if ((fs & FS_RESET) && !(lp & LP_AUTO_LP)) {
++		dev_info(dev, "controller reset seen, auto LPM on\n");
++		s2mm_lpm(s, LPM_AUTO_ENABLE);
++	}
++	if (pd_state == PE_SRC_WAIT_NEW_CAPS && (lp & LP_SLEEP_CABLE)) {
++		s2mm_lpm(s, LPM_SLEEP_CABLE);
++		return;
++	}
++
++	switch (pd_state) {
++	case PE_DETACHED:
++		s2mm_set_role(s, USB_ROLE_NONE, fs);
++		break;
++	case PE_SRC_SEND_CAPS ... PE_SRC_DISABLED:
++		s2mm_set_role(s, USB_ROLE_HOST, fs);
++		break;
++	case PE_SNK_WAIT_CAPS:
++	case PE_SNK_EVAL_CAPS:
++	case PE_SNK_READY:
++	case PE_ERROR_RECOVERY:
++		s2mm_set_role(s, USB_ROLE_DEVICE, fs);
++		break;
++	default:	/* transitional states: keep the role until a stable one shows up */
++		break;
++	}
++}
++
++static void s2mm_event(struct s2mm005 *s)
++{
++	u8 st[48];
++	u8 clear = CMD_INT_CLEAR;
++
++	guard(mutex)(&s->lock);
++	s2mm_update(s);
++	if (!s2mm_read(s, REG_INT_STATUS, st, sizeof(st)))
++		dev_dbg(&s->client->dev, "msg irq %*phN\n", 4, &st[16]);
++	if (s2mm_cmd(s, &clear, 1))
++		dev_warn(&s->client->dev, "interrupt clear failed\n");
++	/* a change between the state read and the clear raised no edge of its own */
++	s2mm_update(s);
++}
++
++static irqreturn_t s2mm_irq(int irq, void *data)
++{
++	s2mm_event(data);
++	return IRQ_HANDLED;
++}
++
++static int s2mm_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct typec_capability cap = { };
++	struct s2mm005 *s;
++	int ret;
++
++	if (!client->irq)
++		return dev_err_probe(dev, -EINVAL, "no interrupt\n");
++	s = devm_kzalloc(dev, sizeof(*s), GFP_KERNEL);
++	if (!s)
++		return -ENOMEM;
++	s->client = client;
++	s->role = USB_ROLE_NONE;
++	i2c_set_clientdata(client, s);
++	ret = devm_mutex_init(dev, &s->lock);
++	if (ret)
++		return ret;
++
++	s->connector = device_get_named_child_node(dev, "connector");
++	if (!s->connector)
++		return dev_err_probe(dev, -ENODEV, "no connector node\n");
++	s->role_sw = fwnode_usb_role_switch_get(s->connector);
++	if (IS_ERR(s->role_sw)) {
++		ret = dev_err_probe(dev, PTR_ERR(s->role_sw), "role switch\n");
++		goto err_fwnode;
++	}
++	s->vbus = devm_of_regulator_get_optional(dev, to_of_node(s->connector), "vbus");
++	if (IS_ERR(s->vbus)) {
++		ret = PTR_ERR(s->vbus);
++		if (ret != -ENODEV) {
++			dev_err_probe(dev, ret, "vbus supply\n");
++			goto err_role;
++		}
++		dev_warn(dev, "no vbus-supply: host role without VBUS\n");
++		s->vbus = NULL;
++	}
++
++	ret = typec_get_fw_cap(&cap, s->connector);
++	if (ret) {
++		dev_err_probe(dev, ret, "connector properties\n");
++		goto err_role;
++	}
++	cap.revision = USB_TYPEC_REV_1_2;	/* as the stock typec_cap (s2mm005.c:1117-1119) */
++	cap.pd_revision = 0x300;
++	cap.driver_data = s;
++	s->port = typec_register_port(dev, &cap);
++	if (IS_ERR(s->port)) {
++		ret = dev_err_probe(dev, PTR_ERR(s->port), "typec port\n");
++		goto err_role;
++	}
++
++	/* stock probe: IRQ first, then one pass over the current state (s2mm005.c:1170-1216, TEMP_CODE path) */
++	ret = request_threaded_irq(client->irq, NULL, s2mm_irq, IRQF_ONESHOT, dev_name(dev), s);
++	if (ret) {
++		dev_err_probe(dev, ret, "irq %d\n", client->irq);
++		goto err_port;
++	}
++	s2mm_event(s);
++	return 0;
++
++err_port:
++	typec_unregister_port(s->port);
++err_role:
++	usb_role_switch_put(s->role_sw);
++err_fwnode:
++	fwnode_handle_put(s->connector);
++	return ret;
++}
++
++static void s2mm_remove(struct i2c_client *client)
++{
++	struct s2mm005 *s = i2c_get_clientdata(client);
++
++	free_irq(client->irq, s);
++	mutex_lock(&s->lock);
++	s2mm_set_role(s, USB_ROLE_NONE, 0);
++	mutex_unlock(&s->lock);
++	typec_unregister_port(s->port);
++	usb_role_switch_put(s->role_sw);
++	fwnode_handle_put(s->connector);
++}
++
++/* no VBUS from the boost across reboot */
++static void s2mm_shutdown(struct i2c_client *client)
++{
++	struct s2mm005 *s = i2c_get_clientdata(client);
++
++	disable_irq(client->irq);
++	guard(mutex)(&s->lock);
++	s2mm_vbus(s, false);
++}
++
++static const struct of_device_id s2mm_of_match[] = {
++	{ .compatible = "samsung,s2mm005" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s2mm_of_match);
++
++static struct i2c_driver s2mm_driver = {
++	.driver = {
++		.name = "s2mm005-t545",
++		.of_match_table = s2mm_of_match,
++	},
++	.probe = s2mm_probe,
++	.remove = s2mm_remove,
++	.shutdown = s2mm_shutdown,
++};
++module_i2c_driver(s2mm_driver);
++
++MODULE_DESCRIPTION("Samsung S2MM005 Type-C controller of the SM-T545 (attach state, data role, VBUS)");
++MODULE_LICENSE("GPL");
+-- 
+2.47.3
+

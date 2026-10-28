@@ -1,0 +1,39 @@
+From 5d85de6af3940cf62d8ff81e31ba00ffa6cca2b1 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:51 +0200
+Subject: [PATCH 04/14] pmdomain: core: genpd_provider_sync_state must honour
+ pd_ignore_unused
+
+The sync_state callback ignored pd_ignore_unused and powered down domains the firmware still uses on this SoC.
+---
+ drivers/pmdomain/core.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/pmdomain/core.c b/drivers/pmdomain/core.c
+index 03209653b..8013b850f 100644
+--- a/drivers/pmdomain/core.c
++++ b/drivers/pmdomain/core.c
+@@ -3491,6 +3491,10 @@ void of_genpd_sync_state(struct device_node *np)
+ 	if (!np)
+ 		return;
+ 
++	/* Samsung SM-T545: the bootloader leaves SMMU TBU GDSCs on for its splash; powering them off resets the SoC */
++	if (pd_ignore_unused)
++		return;
++
+ 	mutex_lock(&gpd_list_lock);
+ 	list_for_each_entry(genpd, &gpd_list, gpd_list_node) {
+ 		if (genpd->provider == of_fwnode_handle(np)) {
+@@ -3512,6 +3516,9 @@ static void genpd_provider_sync_state(struct device *dev)
+ {
+ 	struct generic_pm_domain *genpd = container_of(dev, struct generic_pm_domain, dev);
+ 
++	if (pd_ignore_unused)
++		return;
++
+ 	switch (genpd->sync_state) {
+ 	case GENPD_SYNC_STATE_OFF:
+ 		break;
+-- 
+2.47.3
+

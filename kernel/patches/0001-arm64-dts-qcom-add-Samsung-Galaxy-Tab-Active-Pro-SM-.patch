@@ -1,0 +1,1788 @@
+From fca519a6b9fdb854b7a577a49e4686606fcdc987 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:51 +0200
+Subject: [PATCH 01/14] arm64: dts: qcom: add Samsung Galaxy Tab Active Pro
+ (SM-T545) board and sdm670 changes
+
+Board DTS for the SM-T545 (sdm670-samsung-gtactivexl) with the t545-*.dtsi fragments (eMMC, memory map, USB/OTG, headset and mic routing, Venus, protected GCC clocks, initrd) and the sdm670.dtsi additions it needs. The Samsung bootloader only accepts a boot image that carries the stock DTB, so the stage-1 stub in this project replaces it at boot.
+---
+ .../bindings/media/i2c/samsung,s5k3l6.yaml    |  117 ++
+ arch/arm64/boot/dts/qcom/Makefile             |    1 +
+ .../dts/qcom/sdm670-samsung-gtactivexl.dts    | 1028 +++++++++++++++++
+ arch/arm64/boot/dts/qcom/sdm670.dtsi          |    9 +-
+ arch/arm64/boot/dts/qcom/t545-disable.dtsi    |   59 +
+ arch/arm64/boot/dts/qcom/t545-emmc.dtsi       |   40 +
+ .../boot/dts/qcom/t545-gcc-protected.dtsi     |   10 +
+ arch/arm64/boot/dts/qcom/t545-headset.dtsi    |   70 ++
+ arch/arm64/boot/dts/qcom/t545-initrd.dtsi     |    6 +
+ arch/arm64/boot/dts/qcom/t545-memory.dtsi     |    8 +
+ arch/arm64/boot/dts/qcom/t545-mic.dtsi        |  120 ++
+ arch/arm64/boot/dts/qcom/t545-misc.dtsi       |   27 +
+ arch/arm64/boot/dts/qcom/t545-otg.dtsi        |   65 ++
+ arch/arm64/boot/dts/qcom/t545-usb.dtsi        |   49 +
+ arch/arm64/boot/dts/qcom/t545-venus.dtsi      |   21 +
+ include/dt-bindings/clock/qcom,gcc-sdm845.h   |    1 +
+ 16 files changed, 1630 insertions(+), 1 deletion(-)
+ create mode 100644 Documentation/devicetree/bindings/media/i2c/samsung,s5k3l6.yaml
+ create mode 100644 arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-disable.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-emmc.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-gcc-protected.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-headset.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-initrd.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-memory.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-mic.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-misc.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-otg.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-usb.dtsi
+ create mode 100644 arch/arm64/boot/dts/qcom/t545-venus.dtsi
+
+diff --git a/Documentation/devicetree/bindings/media/i2c/samsung,s5k3l6.yaml b/Documentation/devicetree/bindings/media/i2c/samsung,s5k3l6.yaml
+new file mode 100644
+index 000000000..c5642ea19
+--- /dev/null
++++ b/Documentation/devicetree/bindings/media/i2c/samsung,s5k3l6.yaml
+@@ -0,0 +1,117 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/media/i2c/samsung,s5k3l6.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Samsung S5K3L6 13MP MIPI CSI-2 image sensor
++
++maintainers:
++  - Vincent Cloutier <vincent@cloutier.co>
++  - Purism Kernel Team <kernel@puri.sm>
++
++description: |-
++  The Samsung S5K3L6 is a raw Bayer image sensor with a MIPI CSI-2 image
++  data interface and an I2C-compatible control bus.
++
++allOf:
++  - $ref: /schemas/media/video-interface-devices.yaml#
++
++properties:
++  compatible:
++    const: samsung,s5k3l6
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    description: Reference to the sensor input clock.
++    maxItems: 1
++
++  reset-gpios:
++    description: Active-low reset GPIO.
++    maxItems: 1
++
++  vdda-supply:
++    description: Analog power supply.
++
++  vddd-supply:
++    description: Digital core power supply.
++
++  vddio-supply:
++    description: Digital I/O power supply.
++
++  port:
++    $ref: /schemas/graph.yaml#/$defs/port-base
++    unevaluatedProperties: false
++
++    properties:
++      endpoint:
++        $ref: /schemas/media/video-interfaces.yaml#
++        unevaluatedProperties: false
++
++        properties:
++          data-lanes:
++            items:
++              - const: 1
++              - const: 2
++
++          link-frequencies:
++            minItems: 3
++            maxItems: 3
++            items:
++              - const: 537500000
++              - const: 600000000
++              - const: 625000000
++
++        required:
++          - data-lanes
++          - link-frequencies
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - vdda-supply
++  - vddd-supply
++  - vddio-supply
++  - port
++
++unevaluatedProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/imx8mq-clock.h>
++    #include <dt-bindings/gpio/gpio.h>
++
++    i2c {
++        #address-cells = <1>;
++        #size-cells = <0>;
++
++        camera@2d {
++            compatible = "samsung,s5k3l6";
++            reg = <0x2d>;
++
++            clocks = <&clk IMX8MQ_CLK_CLKO2>;
++            assigned-clocks = <&clk IMX8MQ_CLK_CLKO2>;
++            assigned-clock-rates = <25000000>;
++
++            reset-gpios = <&gpio1 26 GPIO_ACTIVE_LOW>;
++            vdda-supply = <&reg_camera_vdda>;
++            vddd-supply = <&reg_camera_vddd>;
++            vddio-supply = <&reg_camera_vddio>;
++
++            orientation = <1>;
++            rotation = <270>;
++
++            port {
++                camera_out: endpoint {
++                    data-lanes = <1 2>;
++                    link-frequencies = /bits/ 64
++                        <537500000 600000000 625000000>;
++                    remote-endpoint = <&mipi_csi2_in>;
++                };
++            };
++        };
++    };
++...
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+index 20ac991aa..988789e58 100644
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -365,3 +365,4 @@ x1p42100-hp-omnibook-x14-el2-dtbs := x1p42100-hp-omnibook-x14.dtb x1-el2.dtbo
+ dtb-$(CONFIG_ARCH_QCOM)	+= x1p42100-hp-omnibook-x14.dtb x1p42100-hp-omnibook-x14-el2.dtb
+ x1p42100-lenovo-thinkbook-16-el2-dtbs	:= x1p42100-lenovo-thinkbook-16.dtb x1-el2.dtbo
+ dtb-$(CONFIG_ARCH_QCOM)	+= x1p42100-lenovo-thinkbook-16.dtb x1p42100-lenovo-thinkbook-16-el2.dtb
++dtb-$(CONFIG_ARCH_QCOM)	+= sdm670-samsung-gtactivexl.dtb
+diff --git a/arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts b/arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts
+new file mode 100644
+index 000000000..ca807e380
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sdm670-samsung-gtactivexl.dts
+@@ -0,0 +1,1028 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung Galaxy Tab Active Pro LTE (SM-T545, gtactivexl) - proof-of-life device tree.
++ *
++ * Milestone 1: kernel boots (via the stage1 chain loader, see work/mainline/stage0) and prints to the
++ * screen through the bootloader's continuous-splash framebuffer; kernel log survives a crash in ramoops
++ * with exactly the layout Samsung's 4.9 kernel uses, so the 4.9 kernel can read it back.
++ * Everything else (panel, touch, S Pen, eMMC, charger, USB role switch, ...) is still to do.
++ *
++ * The memory map below is taken from the device tree that Samsung's bootloader hands to its own kernel
++ * (read on the device with the stage0 dumper): carve-outs that mainline sdm670.dtsi does not know about
++ * are added here, the rest of the mainline nodes agree with it.
++ */
++
++/dts-v1/;
++
++#include "sdm670.dtsi"
++#include <dt-bindings/spmi/spmi.h>
++#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
++#include <dt-bindings/input/linux-event-codes.h>
++#include <dt-bindings/sound/qcom,q6afe.h>
++#include <dt-bindings/sound/qcom,q6asm.h>
++#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
++#include "t545-initrd.dtsi"
++#include "t545-memory.dtsi"
++#include "t545-disable.dtsi"
++#include "t545-gcc-protected.dtsi"
++
++/* moved out of Samsung's removed_region, see reserved-memory below */
++/delete-node/ &rmtfs_mem;
++#include "t545-usb.dtsi"
++#include "t545-emmc.dtsi"
++
++/ {
++	model = "Samsung Galaxy Tab Active Pro LTE (SM-T545)";
++	compatible = "samsung,gtactivexl", "qcom,sdm670";
++	chassis-type = "tablet";
++
++	/* same ids as the stock base DT: the bootloader picks the DTB by these */
++	qcom,msm-id = <0x150 0x00>;
++	qcom,board-id = <0x00 0x00>;
++
++
++	chosen {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		bootargs = "console=tty0 consoleblank=0 loglevel=8 ignore_loglevel keep_bootcon clk_ignore_unused pd_ignore_unused arm-smmu.disable_bypass=0 rdinit=/init t545.dl=0 t545.android=1 hung_task_panic=1 panic=1 firmware_class.path=/km/regdb androidboot.wificountrycode=LV androidboot.hardware=qcom androidboot.boot_devices=soc@0/7c4000.mmc androidboot.bootdevice=7c4000.mmc androidboot.selinux=enforcing androidboot.verifiedbootstate=orange androidboot.veritymode=disabled printk.devkmsg=on fbcon=vc:2-6 logo.nologo vt.global_cursor_default=0 log_buf_len=8M cpufreq.default_governor=performance transparent_hugepage=madvise";
++
++		/* bring-up bisect: the chain loader clears this when the search is over (the initramfs reboots while it is 1) */
++		t545,bisect = <1>;
++
++		framebuffer: framebuffer@9c000000 {
++			compatible = "simple-framebuffer";
++			memory-region = <&fb_mem>;
++			width = <1200>;
++			height = <1920>;
++			stride = <(1200 * 4)>;
++			format = "a8r8g8b8";
++		};
++	};
++
++	reserved-memory {
++		#address-cells = <2>;
++		#size-cells = <2>;
++
++		/* cont_splash_region in the stock DT */
++		fb_mem: framebuffer-region@9c000000 {
++			reg = <0 0x9c000000 0 0x2300000>;
++			no-map;
++		};
++
++		/* tail of Samsung's "removed_region" (starts at 85fc0000, 0x3340000 long) after mainline's tz_mem; mainline put rmtfs here */
++		samsung-removed-tail@88f00000 {
++			reg = <0 0x88f00000 0 0x400000>;
++			no-map;
++		};
++
++		/* stock rmtfs was allocated from HLOS RAM at runtime (sharedmem-uio, reg 0): any free HLOS range works, the modem gets the
++		 * address from rmtfs over QMI */
++		rmtfs_mem: rmtfs@a0000000 {
++			compatible = "qcom,rmtfs-mem";
++			reg = <0 0xa0000000 0 0x200000>;
++			no-map;
++
++			qcom,client-id = <1>;
++			qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
++		};
++
++
++		dfps-data@9e300000 {
++			reg = <0 0x9e300000 0 0x100000>;
++			no-map;
++		};
++
++		/* state of the chain loader's bring-up bisect: survives warm resets, nothing else may touch it */
++		t545-scratch@a0f00000 {
++			reg = <0 0xa0f00000 0 0x100000>;
++			no-map;
++		};
++
++		ss-plog@a1100000 {
++			reg = <0 0xa1100000 0 0x200000>;
++			no-map;
++		};
++
++		/*
++		 * Same layout as Samsung's 4.9 ramoops (record/console/ftrace/pmsg 0x40000 each, no ecc), so that the
++		 * 4.9 kernel finds this kernel's console log in /sys/fs/pstore after the next boot.
++		 */
++		ramoops@a1300000 {
++			compatible = "ramoops";
++			reg = <0 0xa1300000 0 0x100000>;
++			record-size = <0x40000>;
++			console-size = <0x40000>;
++			ftrace-size = <0x40000>;
++			pmsg-size = <0x40000>;
++			ecc-size = <0>;
++			no-map;
++		};
++
++		sec-debug@a1400000 {
++			reg = <0 0xa1400000 0 0x800000>;
++			no-map;
++		};
++
++		sec-debug-autocomment@a1c00000 {
++			reg = <0 0xa1c00000 0 0x1000>;
++			no-map;
++		};
++
++		/* tima (0xb0000000, 2 MB; contains Samsung's kaslr page at 0xb0001000) and rkp (0xb0200000, 21 MB) */
++		tima-rkp@b0000000 {
++			reg = <0 0xb0000000 0 0x1700000>;
++			no-map;
++		};
++	};
++};
++
++
++/*
++ * Samsung's carve-outs (stock DT): pil_adsp_region 0x93e00000 is 0x2a00000 long (mainline 0x1e00000), and the regions mainline puts
++ * at its end (ipa fw/gsi, the GPU zap shader) sit after it at 0x96800000/0x96810000/0x96815000. The TZ/XPU setup follows Samsung's map,
++ * and the stock ADSP image needs the whole region.
++ */
++&adsp_mem {
++	reg = <0 0x93e00000 0 0x2a00000>;
++};
++
++&ipa_fw_mem {
++	reg = <0 0x96800000 0 0x10000>;
++};
++
++&ipa_gsi_mem {
++	reg = <0 0x96810000 0 0x5000>;
++};
++
++&gpu_mem {
++	reg = <0 0x96815000 0 0x2000>;
++};
++
++&soc {
++	/* LK arms the apps watchdog; the driver pets it when it finds it running (WDOG_HW_RUNNING) */
++	watchdog@17980000 {
++		compatible = "qcom,apss-wdt-sdm845", "qcom,kpss-wdt";
++		reg = <0 0x17980000 0 0x1000>;
++		clocks = <&sleep_clk>;
++		interrupts = <GIC_SPI 0 IRQ_TYPE_EDGE_RISING>;
++	};
++};
++
++/*
++ * Samsung's bootloader enters Download mode when the PMIC PON restart reason (SOFT_RB_SPARE) is 0x15 at reset
++ * (PON_RESTART_REASON_DOWNLOAD in the 4.9 tree): "reboot download" does exactly that through reboot-mode.
++ */
++&spmi_bus {
++	pmic@0 {
++		compatible = "qcom,pm660", "qcom,spmi-pmic";
++		reg = <0x0 SPMI_USID>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		rtc@6000 {
++			compatible = "qcom,pm8941-rtc";
++			reg = <0x6000>, <0x6100>;
++			reg-names = "rtc", "alarm";
++			interrupts = <0x0 0x61 0x1 IRQ_TYPE_EDGE_RISING>;
++		};
++
++		pon: pon@800 {
++			compatible = "qcom,pm8998-pon";
++			reg = <0x800>;
++			mode-download = <0x15>;
++
++			pwrkey {
++				compatible = "qcom,pm8941-pwrkey";
++				interrupts = <0x0 0x8 0 IRQ_TYPE_EDGE_BOTH>;
++				debounce = <15625>;
++				bias-pull-up;
++				linux,code = <KEY_POWER>;
++			};
++
++			resin {
++				compatible = "qcom,pm8941-resin";
++				interrupts = <0x0 0x8 1 IRQ_TYPE_EDGE_BOTH>;
++				debounce = <15625>;
++				bias-pull-up;
++				linux,code = <KEY_VOLUMEDOWN>;
++			};
++		};
++
++		pm660_gpios: gpio@c000 {
++			compatible = "qcom,pm660-gpio", "qcom,spmi-gpio";
++			reg = <0xc000>;
++			gpio-controller;
++			gpio-ranges = <&pm660_gpios 0 0 13>;
++			#gpio-cells = <2>;
++			interrupt-controller;
++			#interrupt-cells = <2>;
++
++			pm660_keys: keys-state {
++				pins = "gpio3", "gpio13";
++				function = "normal";
++				qcom,drive-strength = <PMIC_GPIO_STRENGTH_NO>;
++				input-enable;
++				bias-pull-up;
++			};
++		};
++	};
++
++	pmic@2 {
++		compatible = "qcom,pm660l", "qcom,spmi-pmic";
++		reg = <0x2 SPMI_USID>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		pm660l_gpios: gpio@c000 {
++			compatible = "qcom,pm660l-gpio", "qcom,spmi-gpio";
++			reg = <0xc000>;
++			gpio-controller;
++			gpio-ranges = <&pm660l_gpios 0 0 12>;
++			#gpio-cells = <2>;
++			interrupt-controller;
++			#interrupt-cells = <2>;
++
++			pm660l_keys: keys-state {
++				pins = "gpio2", "gpio4", "gpio7";
++				function = "normal";
++				qcom,drive-strength = <PMIC_GPIO_STRENGTH_NO>;
++				input-enable;
++				bias-pull-up;
++			};
++		};
++	};
++};
++
++/*
++ * Hardware keys on PMIC GPIOs (stock gpio_keys node; codes translated from Samsung's: 254 = KEY_RECENT -> KEY_APPSELECT).
++ * The stock "func_key" (Active key, Samsung code 252) becomes KEY_ASSISTANT: LineageOS lets the user pick its actions (rro/).
++ */
++/*
++ * WCN3990 Wi-Fi + Bluetooth. Rails as in the stock icnss / bt_wcn3990 nodes (the same as the Pixel 3a): pm660 L5 0.8 V (cx-mx),
++ * L6 1.3 V (rfa), L9 1.8 V (xo), L19 3.3 V (ch0). Bluetooth on QUP SE6 (stock serial-hs@898000 = uart6), firmware qca/crbtfw21.tlv +
++ * qca/crnv21.bin. Wi-Fi firmware runs on the modem: mss_pil (mba.mbn + modem.mdt from the "modem" partition) and wifi@18800000 are
++ * switched on by the stub (group "wifi"), not here.
++ */
++&apps_rsc {
++	regulators-0 {
++		vreg_l5a_0p848: ldo5 {
++			regulator-min-microvolt = <800000>;
++			regulator-max-microvolt = <800000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++
++		vreg_l6a_1p3: ldo6 {
++			regulator-min-microvolt = <1248000>;
++			regulator-max-microvolt = <1304000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++
++		vreg_l9a_1p8: ldo9 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++
++		vreg_l19a_3p3: ldo19 {
++			regulator-min-microvolt = <3000000>;
++			regulator-max-microvolt = <3312000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++	};
++};
++
++/ {
++	aliases {
++		hsuart0 = &uart6;	/* qcom_geni_serial refuses a non-console UART without an hsuart alias ("Invalid line") */
++	};
++};
++
++&uart6 {
++	pinctrl-0 = <&qup_uart6_4pin>;
++	status = "okay";
++
++	bluetooth {
++		compatible = "qcom,wcn3990-bt";
++		vddxo-supply = <&vreg_l9a_1p8>;
++		vddrf-supply = <&vreg_l6a_1p3>;
++		vddch0-supply = <&vreg_l19a_3p3>;
++		max-speed = <3200000>;
++		/* this tablet's address from /mnt/vendor/efs/bluetooth/bt_addr (C0:3D:03:C3:A8:E0), little-endian */
++		local-bd-address = [e0 a8 c3 03 3d c0];
++	};
++};
++
++&mss_pil {
++	firmware-name = "mba.mbn", "modem.mdt";
++};
++
++&wifi {
++	vdd-0.8-cx-mx-supply = <&vreg_l5a_0p848>;
++	vdd-1.8-xo-supply = <&vreg_l9a_1p8>;
++	vdd-1.3-rfa-supply = <&vreg_l6a_1p3>;
++	vdd-3.3-ch0-supply = <&vreg_l19a_3p3>;
++	qcom,snoc-host-cap-8bit-quirk;
++	/* this tablet's address from /mnt/vendor/efs/wifi/.mac.info (the firmware has none: ath10k picked a random one) */
++	local-mac-address = [c0 3d 03 c3 a8 e1];
++};
++
++/ {
++	gpio-keys {
++		compatible = "gpio-keys";
++		autorepeat;
++		pinctrl-names = "default";
++		pinctrl-0 = <&pm660_keys>, <&pm660l_keys>;
++
++		key-vol-up {
++			label = "volume_up";
++			linux,code = <KEY_VOLUMEUP>;
++			gpios = <&pm660l_gpios 7 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++		};
++
++		key-home {
++			label = "home_key";
++			linux,code = <KEY_HOMEPAGE>;
++			gpios = <&pm660l_gpios 4 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++			wakeup-source;
++		};
++
++		key-back {
++			label = "back_key";
++			linux,code = <KEY_BACK>;
++			gpios = <&pm660_gpios 13 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++		};
++
++		key-recent {
++			label = "recent_key";
++			linux,code = <KEY_APPSELECT>;
++			gpios = <&pm660_gpios 3 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++		};
++
++		key-active {
++			label = "func_key";
++			linux,code = <KEY_ASSISTANT>;
++			gpios = <&pm660l_gpios 2 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++		};
++	};
++};
++
++/* TZ-owned pins hang the SoC when read: ctrl/tlmm_find.py scanned every pin, only gpio0 and gpio81 hang (the QUP SPI quads 0-3, 81-84 as on the Pixel 3a) */
++&tlmm {
++	gpio-reserved-ranges = <0 4>, <81 4>;
++
++	/*
++	 * INTb of both CS35L41 (their GPIO2, open drain): stock bias-disable with a board pull-up. Without a state the pin kept the
++	 * reset default pull-down, which held the line low: endless interrupt, "irq 165: nobody cared" and the amp faults unhandled.
++	 */
++	cs35l41_int_default: cs35l41-int-default-state {
++		pins = "gpio78";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++};
++
++/*
++ * Memory-mapped arch timer = the hardware tick broadcast for the cpu-sleep idle states (local-timer-stop). sdm670.dtsi lacks it,
++ * so only the hrtimer broadcast was left; stock SDM670 and mainline SDM845 have this node (same frames and interrupts).
++ */
++&soc {
++	timer@17c90000 {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges = <0 0 0 0x20000000>;
++		compatible = "arm,armv7-timer-mem";
++		reg = <0 0x17c90000 0 0x1000>;
++
++		frame@17ca0000 {
++			frame-number = <0>;
++			interrupts = <GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 6 IRQ_TYPE_LEVEL_HIGH>;
++			reg = <0x17ca0000 0x1000>,
++			      <0x17cb0000 0x1000>;
++		};
++
++		frame@17cc0000 {
++			frame-number = <1>;
++			interrupts = <GIC_SPI 8 IRQ_TYPE_LEVEL_HIGH>;
++			reg = <0x17cc0000 0x1000>;
++			status = "disabled";
++		};
++
++		frame@17cd0000 {
++			frame-number = <2>;
++			interrupts = <GIC_SPI 9 IRQ_TYPE_LEVEL_HIGH>;
++			reg = <0x17cd0000 0x1000>;
++			status = "disabled";
++		};
++
++		frame@17ce0000 {
++			frame-number = <3>;
++			interrupts = <GIC_SPI 10 IRQ_TYPE_LEVEL_HIGH>;
++			reg = <0x17ce0000 0x1000>;
++			status = "disabled";
++		};
++
++		frame@17cf0000 {
++			frame-number = <4>;
++			interrupts = <GIC_SPI 11 IRQ_TYPE_LEVEL_HIGH>;
++			reg = <0x17cf0000 0x1000>;
++			status = "disabled";
++		};
++
++		frame@17d00000 {
++			frame-number = <5>;
++			interrupts = <GIC_SPI 12 IRQ_TYPE_LEVEL_HIGH>;
++			reg = <0x17d00000 0x1000>;
++			status = "disabled";
++		};
++
++		frame@17d10000 {
++			frame-number = <6>;
++			interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>;
++			reg = <0x17d10000 0x1000>;
++			status = "disabled";
++		};
++	};
++};
++
++/* QUP I2C buses that carry the interesting parts: se1 = Wacom (0x56), se7 = cs35l41 amps (0x41/0x43), se9 = FTS touch (0x49), se10 = smb1355/aqt1000/nx30p6093 */
++&i2c1 { status = "okay"; };
++/*
++ * Speakers: two CS35L41 boosted amps on se7 (stock: 0x41 right, 0x43 left), fed by Secondary MI2S (LPASS LPI gpio8 clk, gpio9 ws,
++ * gpio10/11 data; stock msm-mi2s-rx-lines = SD0) through the ADSP AFE. One shared reset line (TLMM 100), so only one node owns it.
++ * Boost inductor/capacitor are the Cirrus reference values (the stock DT gives only the 4.1 A peak).
++ */
++&i2c7 {
++	status = "okay";
++
++	spk_r: amplifier@41 {
++		compatible = "cirrus,cs35l41";
++		reg = <0x41>;
++		/* both amps share INTb on TLMM 78 (stock interrupts = <78 0>); the mainline driver requires an IRQ */
++		interrupts-extended = <&tlmm 78 IRQ_TYPE_LEVEL_LOW>;
++		reset-gpios = <&tlmm 100 GPIO_ACTIVE_HIGH>;	/* the driver drives 1 to leave reset (stock flags 0) */
++		pinctrl-names = "default";
++		pinctrl-0 = <&cs35l41_int_default>;
++		/* GPIO2 = interrupt output, open drain: both amps share the line (stock src 4 = push-pull low on both) */
++		cirrus,gpio2-src-select = <2>;
++		cirrus,gpio2-output-enable;
++		#sound-dai-cells = <1>;
++		sound-name-prefix = "SpkR";
++		cirrus,boost-peak-milliamp = <4100>;
++		cirrus,boost-ind-nanohenry = <1000>;
++		cirrus,boost-cap-microfarad = <15>;
++		cirrus,asp-sdout-hiz = <3>;
++	};
++
++	spk_l: amplifier@43 {
++		compatible = "cirrus,cs35l41";
++		reg = <0x43>;
++		/* both amps share INTb on TLMM 78 (stock interrupts = <78 0>); the mainline driver requires an IRQ */
++		interrupts-extended = <&tlmm 78 IRQ_TYPE_LEVEL_LOW>;
++		cirrus,gpio2-src-select = <2>;
++		cirrus,gpio2-output-enable;
++		#sound-dai-cells = <1>;
++		sound-name-prefix = "SpkL";
++		cirrus,boost-peak-milliamp = <4100>;
++		cirrus,boost-ind-nanohenry = <1000>;
++		cirrus,boost-cap-microfarad = <15>;
++		cirrus,asp-sdout-hiz = <3>;
++	};
++};
++
++/*
++ * LPI TLMM: with no clocks the driver probes at boot and reads the registers of the still unpowered LPASS (hung the SoC in LKM71).
++ * The LPASS island is only powered while the ADSP runs one of its clocks (the stock machine driver enables the MI2S clock before it
++ * writes the LPI pins); the stock SDM670 ADSP firmware rejects the LPASS_HW_MACRO_VOTE command ("AFE failed to vote (3)"). So keep
++ * the internal codec MCLK running through the AFE clock controller: the probe waits for the ADSP, and the island stays powered.
++ */
++&lpi_tlmm {
++	clocks = <&q6afecc LPASS_CLK_ID_INT_MCLK_0 LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++	clock-names = "core";
++	assigned-clocks = <&q6afecc LPASS_CLK_ID_INT_MCLK_0 LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++	assigned-clock-rates = <9600000>;
++
++	sec_mi2s_active: sec-mi2s-active-state {
++		clk-pins {
++			pins = "gpio8";
++			function = "i2s1_clk";
++			drive-strength = <8>;
++			bias-disable;
++		};
++
++		ws-pins {
++			pins = "gpio9";
++			function = "i2s1_ws";
++			drive-strength = <8>;
++			bias-disable;
++		};
++
++		data-pins {
++			pins = "gpio10", "gpio11";
++			function = "i2s1_data";
++			drive-strength = <8>;
++			bias-disable;
++		};
++	};
++};
++
++/* q6asm-dai refuses to probe without at least one frontend dai node */
++&q6asmdai {
++	dai@0 {
++		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
++	};
++};
++
++&q6afedai {
++	dai@18 {
++		reg = <SECONDARY_MI2S_RX>;
++		/* stock: rx-lines bitmask 1, but its only active data pin is "sec_mi2s_data1" = LPI gpio11 (SD1); SD0 (gpio10) gave no sound */
++		qcom,sd-lines = <1>;
++	};
++};
++
++/ {
++	sound {
++		compatible = "qcom,sdm845-sndcard";
++		model = "SM-T545";
++		/* the LPI MI2S pins are set by sdm845.c (t545_lpi_pins) once the MI2S clock powers the LPASS island */
++
++		mm1-dai-link {
++			link-name = "MultiMedia1";
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
++			};
++		};
++
++		speaker-dai-link {
++			link-name = "Speakers";
++			cpu {
++				sound-dai = <&q6afedai SECONDARY_MI2S_RX>;
++			};
++			platform {
++				sound-dai = <&q6routing>;
++			};
++			codec {
++				sound-dai = <&spk_l 0>, <&spk_r 0>;
++			};
++		};
++	};
++};
++&i2c9 { status = "okay"; };
++
++&i2c10 {
++	status = "okay";
++
++	/* S2MM005 USB-PD controller (stock usbpd-s2mm005@33): runs its own flash firmware and negotiates by itself; no driver
++	 * binds here, sm5705-chg-t545 reads the contract and sends the PDO-select command through this client */
++	pdic: typec@33 {
++		compatible = "samsung,s2mm005";
++		reg = <0x33>;
++	};
++};
++
++/* touch (FTS1BA90 @0x49 on se9): avdd = pm660l L6 (3.0-3.3 V), dvdd = pm660 L11 (1.8 V); kept on so that the controller answers */
++&apps_rsc {
++	regulators-0 {
++		vreg_l11a_1p8: ldo11 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-always-on;
++		};
++	};
++
++	regulators-1 {
++		vreg_l6b_3p3: ldo6 {
++			regulator-min-microvolt = <3008000>;
++			regulator-max-microvolt = <3300000>;
++			regulator-always-on;
++		};
++	};
++};
++
++/* bit-banged I2C buses of the stock DT (sda, scl): charger/MUIC SM5705, fuel gauge SM5705, panel power ISL98608 (0x29),
++ * SAR sensors SX9360 (0x28), GPIO expander PCAL6524 (0x22; its pin 17 enables the Wacom 3.3 V rail) */
++/ {
++	i2c_chg: i2c-gpio-chg {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 43 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 44 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <1>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		/* SM5705 charger; its MUIC (0x25) is reached through a dummy client of the driver */
++		charger@49 {
++			compatible = "samsung,sm5705-chg-t545";
++			reg = <0x49>;
++			/* camera flash LED (SM5705 FLED, stock sm5705_fled): torch-en / flash-en pins on the PCAL6524 */
++			torch-gpios = <&gpio_exp 9 GPIO_ACTIVE_HIGH>;
++			flash-gpios = <&gpio_exp 14 GPIO_ACTIVE_HIGH>;
++			/* fast charging (off unless sm5705_chg_t545.fast_charge=1) reads the PD contract here */
++			samsung,pdic = <&pdic>;
++		};
++	};
++
++	i2c_fg: i2c-gpio-fg {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 95 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 96 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++	i2c_pnl: i2c-gpio-pnl {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 11 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 12 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++	i2c_sar0: i2c-gpio-sar0 {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 40 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 29 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++	i2c_exp: i2c-gpio-exp {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 8 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 9 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
++	i2c_sar1: i2c-gpio-sar1 {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 91 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 92 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++};
++
++/* display: DPU4.1 -> DSI0 (4 lanes) -> BOE TV101WUM / Himax HX8279. Power chain from the stock DT: gpio21 = tft-vdd, gpio4 = ISL98608
++ * enable (AVDD/AVEE, I2C 0x29 on i2c-gpio 11/12), panel reset gpio126 */
++/ {
++	tft_vdd: regulator-tft-vdd {
++		compatible = "regulator-fixed";
++		regulator-name = "tft-vdd";
++		gpio = <&tlmm 21 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++};
++
++&apps_rsc {
++	regulators-0 {
++		vreg_l1a_1p225: ldo1 {
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1250000>;
++		};
++	};
++};
++
++&mdss_mdp {
++	status = "okay";
++};
++
++&mdss_dsi0 {
++	vdda-supply = <&vreg_l1a_1p225>;
++	status = "okay";
++
++	panel: panel@0 {
++		compatible = "samsung,sm-t545-hx8279";
++		reg = <0>;
++		power-supply = <&tft_vdd>;
++		reset-gpios = <&tlmm 126 GPIO_ACTIVE_LOW>;
++		isl-enable-gpios = <&tlmm 4 GPIO_ACTIVE_HIGH>;
++
++		port {
++			panel_in: endpoint {
++				remote-endpoint = <&mdss_dsi0_out>;
++			};
++		};
++	};
++};
++
++&mdss_dsi0_out {
++	remote-endpoint = <&panel_in>;
++	data-lanes = <0 1 2 3>;
++};
++
++&mdss_dsi0_phy {
++	vdds-supply = <&vreg_l1b_0p925>;
++	status = "okay";
++};
++
++/* touch: STMicroelectronics FTS1BA90 on QUP1 se1 (i2c9, GPI DMA only), IRQ = GPIO 123, active low */
++&i2c9 {
++	touchscreen@49 {
++		compatible = "st,fts1ba90-t545";
++		reg = <0x49>;
++		interrupts-extended = <&tlmm 123 IRQ_TYPE_LEVEL_LOW>;
++		touchscreen-size-x = <1200>;
++		touchscreen-size-y = <1920>;
++	};
++};
++
++/* pen: Wacom W9019 on QUP0 se1 (i2c1) @0x56, IRQ GPIO 79 (low); its 3.3 V rail is pin 17 of the PCAL6524 on the "exp" bit-banged bus */
++&i2c_exp {
++	gpio_exp: gpio@22 {
++		compatible = "nxp,pcal6524";
++		reg = <0x22>;
++		gpio-controller;
++		#gpio-cells = <2>;
++	};
++};
++
++/ {
++	wacom_3v3: regulator-wacom {
++		compatible = "regulator-fixed";
++		regulator-name = "wacom_3.3v";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		gpio = <&gpio_exp 17 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
++	/*
++	 * Power of the SSC sensors (accel/gyro ICM-4x6xx, AK0991x, LPS22HH, ...) behind the ADSP sensor hub: the stock lpass PIL node has
++	 * qcom,gpio-sensor-ldo = <expander 19>. Without it the hub reports no physical sensors. Kept on: the ADSP may (re)boot any time.
++	 */
++	regulator-sensor-ldo {
++		compatible = "regulator-fixed";
++		regulator-name = "sensor_ldo";
++		gpio = <&gpio_exp 19 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-always-on;
++		regulator-boot-on;
++	};
++};
++
++&i2c1 {
++	pen@56 {
++		compatible = "wacom,w9019-t545";
++		reg = <0x56>;
++		interrupts-extended = <&tlmm 79 IRQ_TYPE_LEVEL_LOW>;
++		vdd-supply = <&wacom_3v3>;
++		wacom,max-x = <21658>;
++		wacom,max-y = <13536>;
++		wacom,max-pressure = <4095>;
++		wacom,max-height = <255>;
++		wacom,max-tilt = <63>;
++		/* checked with the pen on Android: x-invert + xy-switch moved the cursor the opposite way on both screen axes */
++		wacom,y-invert;
++		wacom,xy-switch;
++	};
++};
++
++/* battery: SM5705 fuel gauge on the "fg" bit-banged bus */
++&i2c_fg {
++	fuel-gauge@71 {
++		compatible = "samsung,sm5705-fg-t545";
++		reg = <0x71>;
++	};
++};
++
++/* Android first-stage init reads the vendor/product mounts from the device tree (device names via ueventd by-name links) */
++/ {
++	firmware {
++		android {
++			compatible = "android,firmware";
++
++			fstab {
++				compatible = "android,fstab";
++
++				/* EROFS since LKM928 (an ext4 vendor image needs type "ext4", mnt_flags "ro,barrier=1,discard" again) */
++				vendor {
++					compatible = "android,vendor";
++					dev = "/dev/block/by-name/vendor";
++					type = "erofs";
++					mnt_flags = "ro";
++					fsmgr_flags = "wait";
++					status = "ok";
++				};
++
++				product {
++					compatible = "android,product";
++					dev = "/dev/block/by-name/product";
++					type = "ext4";
++					mnt_flags = "ro,errors=panic";
++					fsmgr_flags = "wait";
++				};
++			};
++		};
++	};
++};
++
++/*
++ * Cameras, step 1 (probe only): rear S5K3L6 (CCI1 0x2d, CSIPHY0, MCLK0; driver = the 2026 RFC s5k3l6.c adapted to 24 MHz) and front S5K4HA (CCI1 0x10, CSIPHY1, MCLK1), per the stock
++ * camera dtsi (sdm670-sec-gtactivexl-camera-sensor-r00.dtsi): VIO = pm660 L14 1.8 V, rear reset = expander pin 2, rear AVDD+AF = pin 1,
++ * front AVDD (FCAM_LDO) = pin 8, front reset = TLMM 99. There is no mainline driver for either sensor yet: the s5k3m5 driver (same
++ * Samsung CCI16 family) powers them up and reads the chip id register 0x0000, so "chip id mismatch: 30d5!=30c6/48ab" in dmesg proves
++ * rails, MCLK, reset and CCI. CCI/CAMCC/CAMSS are switched on by the stub (group "cam").
++ */
++&apps_rsc {
++	regulators-0 {
++		vreg_s6a_0p87: smps6 {
++			regulator-min-microvolt = <1224000>;
++			regulator-max-microvolt = <1352000>;
++			regulator-enable-ramp-delay = <150>;
++		};
++
++		vreg_l14a_1p8: ldo14 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-enable-ramp-delay = <250>;
++			/* camera VIO; probably also the pull-up rail of the camera i2c-gpio bus (AF driver, EEPROM): nothing answered
++			 * there while the sensors were runtime-suspended */
++			regulator-always-on;
++		};
++	};
++};
++
++/ {
++	cam_rear_avdd: regulator-cam-rear-avdd {
++		compatible = "regulator-fixed";
++		regulator-name = "rcam_avdd";
++		gpio = <&gpio_exp 1 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		startup-delay-us = <1000>;
++		/* also the AF driver's supply ("AVDD, AF ENABLE"); dw9807-vcm has no regulator handling */
++		regulator-always-on;
++	};
++
++	/* bit-banged I2C of the stock camera dtsi (gpio27 sda / gpio28 scl): rear AF driver DW9808 0x0c, EEPROM 0x58 */
++	i2c_cam: i2c-gpio-cam {
++		compatible = "i2c-gpio";
++		sda-gpios = <&tlmm 27 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&tlmm 28 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <2>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		/* DW9808: same register map as the DW9807 (0x02 control, 0x03/0x04 10-bit position) */
++		/* 7-bit 0x0c (the stock qcom,actuator reg 0x18 is the 8-bit address) */
++		rear_vcm: lens@c {
++			compatible = "dongwoon,dw9807-vcm";
++			reg = <0x0c>;
++			/* not used by the driver, but orders its probe after the expander-switched AVDD: probed first, its first
++			 * runtime suspend got a NACK and left runtime PM in the error state (subdev open: EINVAL) */
++			vdd-supply = <&cam_rear_avdd>;
++		};
++	};
++
++	cam_front_avdd: regulator-cam-front-avdd {
++		compatible = "regulator-fixed";
++		regulator-name = "fcam_avdd";
++		gpio = <&gpio_exp 8 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		startup-delay-us = <1000>;
++	};
++};
++
++/* cci0 (gpio17/18) are the QUP i2c1 pins of the Wacom digitizer: only the cci1 master is wired to cameras here */
++&camss {
++	vdda-phy-supply = <&vreg_l1a_1p225>;
++	vdda-pll-supply = <&vreg_s6a_0p87>;
++};
++
++/* Titan 170 ICP (A5 + HFI) for the hardware ISP bring-up: only the out-of-tree t545-icp.ko module binds it (never
++ * autoloaded); resources from the stock qcom,a5@ac00000 + msm_cam_smmu_icp nodes; CAMERA_ICP.elf goes to IOVA 0 (camera_mem) */
++&soc {
++	icp@ac00000 {
++		compatible = "t545,titan170-icp";
++		reg = <0 0x0ac00000 0 0x6000>,
++		      <0 0x0ac10000 0 0x8000>,
++		      <0 0x0ac18000 0 0x3000>;
++		reg-names = "qgic", "sierra", "csr";
++		interrupts = <GIC_SPI 463 IRQ_TYPE_EDGE_RISING>;
++		clocks = <&gcc GCC_CAMERA_AHB_CLK>,
++			 <&gcc GCC_CAMERA_AXI_CLK>,
++			 <&camcc CAM_CC_SOC_AHB_CLK>,
++			 <&camcc CAM_CC_CPAS_AHB_CLK>,
++			 <&camcc CAM_CC_CAMNOC_AXI_CLK>,
++			 <&camcc CAM_CC_ICP_CLK>,
++			 <&camcc CAM_CC_ICP_CLK_SRC>,
++			 <&camcc CAM_CC_BPS_AHB_CLK>,
++			 <&camcc CAM_CC_BPS_AREG_CLK>,
++			 <&camcc CAM_CC_BPS_AXI_CLK>,
++			 <&camcc CAM_CC_BPS_CLK>,
++			 <&camcc CAM_CC_IPE_0_AHB_CLK>,
++			 <&camcc CAM_CC_IPE_0_AREG_CLK>,
++			 <&camcc CAM_CC_IPE_0_AXI_CLK>,
++			 <&camcc CAM_CC_IPE_0_CLK>;
++		clock-names = "gcc_ahb", "gcc_axi", "soc_ahb", "cpas_ahb", "camnoc_axi", "icp", "icp_src",
++			      "bps_ahb", "bps_areg", "bps_axi", "bps", "ipe0_ahb", "ipe0_areg", "ipe0_axi", "ipe0";
++		power-domains = <&camcc TITAN_TOP_GDSC>, <&camcc BPS_GDSC>, <&camcc IPE_0_GDSC>;
++		power-domain-names = "top", "bps", "ipe0";
++		iommus = <&apps_smmu 0x107a 0x0>,
++			 <&apps_smmu 0x1020 0x8>,
++			 <&apps_smmu 0x1040 0x8>,
++			 <&apps_smmu 0x1030 0x0>,
++			 <&apps_smmu 0x1050 0x0>;
++		memory-region = <&camera_mem>;
++		firmware-name = "CAMERA_ICP.elf";
++		status = "okay";
++	};
++};
++
++&camss_port0 {
++	camss_endpoint0: endpoint {
++		clock-lanes = <7>;
++		data-lanes = <0 1>;
++		remote-endpoint = <&cam_rear_ep>;
++	};
++};
++
++&camss_port1 {
++	camss_endpoint1: endpoint {
++		clock-lanes = <7>;
++		data-lanes = <0 1 2 3>;
++		remote-endpoint = <&cam_front_ep>;
++	};
++};
++
++&cci {
++	pinctrl-0 = <&cci1_default>;
++	pinctrl-1 = <&cci1_sleep>;
++};
++
++&cci_i2c1 {
++	cam_rear: camera@2d {
++		compatible = "samsung,s5k3l6";
++		reg = <0x2d>;
++		clocks = <&camcc CAM_CC_MCLK0_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
++		assigned-clock-rates = <24000000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cam_mclk0_default>;
++		reset-gpios = <&gpio_exp 2 GPIO_ACTIVE_LOW>;
++		vddio-supply = <&vreg_l14a_1p8>;
++		vdda-supply = <&cam_rear_avdd>;
++		/* no separate DVDD switch in the stock camera dtsi: the core rail comes up with AVDD */
++		vddd-supply = <&cam_rear_avdd>;
++		/* no rotation property: libcamera can only flip, so a 90 degree mounting made it 'adjust' every configuration and the
++		 * Android HAL rejects adjusted ones; the HAL takes SENSOR_ORIENTATION 90 from camera_hal.yaml instead */
++		orientation = <1>;
++		lens-focus = <&rear_vcm>;
++
++		port {
++			/* 4 lanes are wired (stock laneAssign 0x3210); the driver's mode tables are for 2 */
++			cam_rear_ep: endpoint {
++				data-lanes = <1 2>;
++				link-frequencies = /bits/ 64 <540000000 600000000 624000000>;
++				remote-endpoint = <&camss_endpoint0>;
++			};
++		};
++	};
++
++	cam_front: camera@10 {
++		/* S5K4HA driver: front-cam agent, register tables decoded from the vendor sensormodule.1_s5k4ha.bin (/build2/frontcam) */
++		compatible = "samsung,s5k4ha";
++		reg = <0x10>;
++		clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clock-rates = <24000000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cam_mclk1_default>;
++		reset-gpios = <&tlmm 99 GPIO_ACTIVE_LOW>;
++		vddio-supply = <&vreg_l14a_1p8>;
++		vdda-supply = <&cam_front_avdd>;
++		/* mounted at 270 degrees: no rotation property, see the rear camera; camera_hal.yaml has it */
++		orientation = <0>;
++
++		port {
++			/* 4 lanes at 668 Mbit/s (vendor 0x0820 = 668) -> D-PHY clock 334 MHz */
++			cam_front_ep: endpoint {
++				data-lanes = <1 2 3 4>;
++				link-frequencies = /bits/ 64 <334000000>;
++				remote-endpoint = <&camss_endpoint1>;
++			};
++		};
++	};
++};
++
++/* built-in microphones (internal codec: PM660L analog + LPASS digital, INT3 MI2S TX) */
++#include "t545-mic.dtsi"
++#include "t545-headset.dtsi"
++#include "t545-misc.dtsi"
++
++#include "t545-venus.dtsi"
++#include "t545-otg.dtsi"
+diff --git a/arch/arm64/boot/dts/qcom/sdm670.dtsi b/arch/arm64/boot/dts/qcom/sdm670.dtsi
+index 04ae629f8..1aa380846 100644
+--- a/arch/arm64/boot/dts/qcom/sdm670.dtsi
++++ b/arch/arm64/boot/dts/qcom/sdm670.dtsi
+@@ -781,6 +781,13 @@ qusb2_hstx_trim: hstx-trim@1eb {
+ 			};
+ 		};
+ 
++		rng: rng@793000 {
++			compatible = "qcom,prng-ee";
++			reg = <0 0x00793000 0 0x1000>;
++			clocks = <&gcc GCC_PRNG_AHB_CLK>;
++			clock-names = "core";
++		};
++
+ 		sdhc_1: mmc@7c4000 {
+ 			compatible = "qcom,sdm670-sdhci", "qcom,sdhci-msm-v5";
+ 			reg = <0 0x007c4000 0 0x1000>,
+@@ -2397,7 +2404,7 @@ usb_1: usb@a6f8800 {
+ 
+ 			status = "disabled";
+ 
+-			usb_1_dwc3: usb@a600000 {
++			usb_1_dwc3: dwc3@a600000 {
+ 				compatible = "snps,dwc3";
+ 				reg = <0 0x0a600000 0 0xcd00>;
+ 				interrupts = <GIC_SPI 133 IRQ_TYPE_LEVEL_HIGH>;
+diff --git a/arch/arm64/boot/dts/qcom/t545-disable.dtsi b/arch/arm64/boot/dts/qcom/t545-disable.dtsi
+new file mode 100644
+index 000000000..22df58897
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-disable.dtsi
+@@ -0,0 +1,59 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Bring-up step 0: everything in the SoC except the interrupt controller is off, so that no driver can touch
++ * hardware that Samsung's firmware keeps gated or protected. Nodes are switched back on one at a time.
++ */
++
++&{/soc@0/qfprom@784000} { status = "disabled"; };
++&{/soc@0/mmc@7c4000} { status = "disabled"; };
++&{/soc@0/dma-controller@800000} { status = "disabled"; };
++&{/soc@0/geniqup@8c0000} { status = "disabled"; };
++&{/soc@0/dma-controller@a00000} { status = "disabled"; };
++&{/soc@0/geniqup@ac0000} { status = "disabled"; };
++&{/soc@0/regulator@ff1000} { status = "disabled"; };
++&{/soc@0/system-cache-controller@1100000} { status = "disabled"; };
++&{/soc@0/interconnect@1380000} { status = "disabled"; };
++&{/soc@0/interconnect@14e0000} { status = "disabled"; };
++&{/soc@0/interconnect@1500000} { status = "disabled"; };
++&{/soc@0/interconnect@1620000} { status = "disabled"; };
++&{/soc@0/interconnect@16e0000} { status = "disabled"; };
++&{/soc@0/interconnect@1700000} { status = "disabled"; };
++&{/soc@0/interconnect@1740000} { status = "disabled"; };
++&{/soc@0/ipa@1e40000} { status = "disabled"; };
++&{/soc@0/hwlock@1f40000} { status = "disabled"; };
++&{/soc@0/syscon@1f60000} { status = "disabled"; };
++&{/soc@0/pinctrl@3400000} { status = "disabled"; };
++&{/soc@0/remoteproc@4080000} { status = "disabled"; };
++&{/soc@0/gpu@5000000} { status = "disabled"; };
++&{/soc@0/iommu@5040000} { status = "disabled"; };
++&{/soc@0/gmu@506a000} { status = "disabled"; };
++&{/soc@0/clock-controller@5090000} { status = "disabled"; };
++&{/soc@0/remoteproc@8300000} { status = "disabled"; };
++&{/soc@0/phy@88e2000} { status = "disabled"; };
++&{/soc@0/usb@a6f8800} { status = "disabled"; };
++&{/soc@0/interrupt-controller@b220000} { status = "disabled"; };
++&{/soc@0/spmi@c440000} { status = "disabled"; };
++&{/soc@0/video-codec@aa00000} { status = "disabled"; };
++&{/soc@0/clock-controller@ab00000} { status = "disabled"; };
++&{/soc@0/cci@ac4a000} { status = "disabled"; };
++&{/soc@0/isp@acb3000} { status = "disabled"; };
++&{/soc@0/clock-controller@ad00000} { status = "disabled"; };
++&{/soc@0/display-subsystem@ae00000} { status = "disabled"; };
++&{/soc@0/clock-controller@af00000} { status = "disabled"; };
++&{/soc@0/reset-controller@b2e0000} { status = "disabled"; };
++&{/soc@0/thermal-sensor@c263000} { status = "disabled"; };
++&{/soc@0/thermal-sensor@c265000} { status = "disabled"; };
++&{/soc@0/reset-controller@c2a0000} { status = "disabled"; };
++&{/soc@0/power-management@c300000} { status = "disabled"; };
++&{/soc@0/iommu@15000000} { status = "disabled"; };
++&{/soc@0/interconnect@17900000} { status = "disabled"; };
++&{/soc@0/mailbox@17990000} { status = "disabled"; };
++&{/soc@0/rsc@179c0000} { status = "disabled"; };
++&{/soc@0/interconnect@17d41000} { status = "disabled"; };
++&{/soc@0/cpufreq@17d43000} { status = "disabled"; };
++&{/soc@0/lmh@17d70800} { status = "disabled"; };
++&{/soc@0/lmh@17d78800} { status = "disabled"; };
++&{/soc@0/wifi@18800000} { status = "disabled"; };
++&{/soc@0/remoteproc@62400000} { status = "disabled"; };
++&{/soc@0/pinctrl@62b40000} { status = "disabled"; };
++&{/soc@0/audio-codec@62ec0000} { status = "disabled"; };
+diff --git a/arch/arm64/boot/dts/qcom/t545-emmc.dtsi b/arch/arm64/boot/dts/qcom/t545-emmc.dtsi
+new file mode 100644
+index 000000000..535090b89
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-emmc.dtsi
+@@ -0,0 +1,40 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * eMMC (sdhci@7c4000, the "bootdevice" of Samsung's kernel): rails taken from the live DT of the running stock kernel,
++ * vdd-supply = pm660l L4 (2.96 V), vdd-io-supply = pm660 L8 (1.8 V). The pad configuration (TLMM sdc1 pins) was left by
++ * the bootloader; the TLMM driver is not used yet.
++ */
++
++&apps_rsc {
++	regulators-0 {
++		vreg_l8a_1p8: ldo8 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++	};
++
++	regulators-1 {
++		vreg_l4b_2p95: ldo4 {
++			regulator-min-microvolt = <2944000>;
++			regulator-max-microvolt = <2960000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++	};
++};
++
++&sdhc_1 {
++	/delete-property/ pinctrl-names;
++	/delete-property/ pinctrl-0;
++	/delete-property/ pinctrl-1;
++
++	/* the bootloader leaves SDCC1 in a state where the HC regs ignore writes until GCC_SDCC1_BCR is pulsed */
++	resets = <&gcc GCC_SDCC1_BCR>;
++
++	vmmc-supply = <&vreg_l4b_2p95>;
++	vqmmc-supply = <&vreg_l8a_1p8>;
++
++	mmc-ddr-1_8v;
++	mmc-hs200-1_8v;
++	mmc-hs400-1_8v;
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-gcc-protected.dtsi b/arch/arm64/boot/dts/qcom/t545-gcc-protected.dtsi
+new file mode 100644
+index 000000000..8721fe2b4
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-gcc-protected.dtsi
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* found by the stub's group search on the SM-T545: GCC_QSPI_CORE_CLK_SRC hangs the SoC when read; the QSPI/LPASS
++ * clocks around it are owned by TrustZone/other subsystems on every SDM845-family board */
++&gcc {
++	protected-clocks = <GCC_QSPI_CORE_CLK>,
++			   <GCC_QSPI_CORE_CLK_SRC>,
++			   <GCC_QSPI_CNOC_PERIPH_AHB_CLK>,
++			   <GCC_LPASS_Q6_AXI_CLK>,
++			   <GCC_LPASS_SWAY_CLK>;
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-headset.dtsi b/arch/arm64/boot/dts/qcom/t545-headset.dtsi
+new file mode 100644
+index 000000000..4beac0122
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-headset.dtsi
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * SM-T545 3.5 mm headset jack: headphones (HPHL/HPHR) and headset microphone (AMIC2).
++ *
++ * Playback: MultiMedia1 -> q6routing INT0_MI2S_RX -> AFE port 0x102e (INT0 MI2S RX, SD0+SD1) -> LPASS digital codec RX1/RX2
++ *           -> PDM over LPI gpio18 clk / gpio19 sync / gpio21 rx0 / gpio23 rx1 / gpio25 rx2 -> PM660L HPHL/HPHR (stock mi2s dev-id 7).
++ * Capture:  AMIC2 (MIC BIAS 2, external type with ext cap) goes through the mic path of t545-mic.dtsi (ADC2 -> DEC1 -> INT3_MI2S_TX).
++ * Plug detection: the PM660L MBHC by default. The stock kernel does not use it (it has a TLMM plug switch, gpio125 active low, and a
++ * media key, gpio116 active low, read by Samsung sec_jack): if MBHC does not see the plug, enable the two earjack-*-gpios lines below.
++ * LPI pins are set by sdm845.c once the INT0 bit clock powers LPASS, never at boot.
++ * Include after t545-mic.dtsi (it replaces that file's sound audio-routing, so the microphone entries are repeated).
++ */
++
++&tlmm {
++	earjack_default: earjack-default-state {
++		pins = "gpio116", "gpio125";
++		function = "gpio";
++		bias-disable;
++		drive-strength = <2>;
++		input-enable;
++	};
++};
++
++&pm660l_codec {
++	/* MBHC button thresholds in mV (apq8016 reference values, the stock kernel has no MBHC to take them from); needs a calibration run */
++	qcom,mbhc-vthreshold-low = <75 150 237 450 500>;
++	qcom,mbhc-vthreshold-high = <75 150 237 450 500>;
++};
++
++&q6afedai {
++	dai@95 {
++		reg = <INT0_MI2S_RX>;
++		/* stock qcom,msm-mi2s-rx-lines = 3; two channels go on SD0 */
++		qcom,sd-lines = <0 1>;
++	};
++};
++
++/ {
++	sound {
++		pinctrl-0 = <&earjack_default>;
++		pinctrl-names = "default";
++
++		/* plug switch / media key instead of the MBHC (see above); both active low */
++		earjack-det-gpios = <&tlmm 125 GPIO_ACTIVE_LOW>;
++		earjack-key-gpios = <&tlmm 116 GPIO_ACTIVE_LOW>;
++
++		audio-routing = "Analog AMIC1", "Analog MIC BIAS External1",
++				"Analog AMIC3", "Analog MIC BIAS External1",
++				"Analog AMIC2", "Analog MIC BIAS External2",
++				"Analog AMIC2", "Headset Mic",
++				"Headphone Jack", "Analog HPH_L",
++				"Headphone Jack", "Analog HPH_R";
++
++		headset-dai-link {
++			link-name = "Headset";
++
++			cpu {
++				sound-dai = <&q6afedai INT0_MI2S_RX>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&lpass_codec 0>, <&pm660l_codec 0>;
++			};
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-initrd.dtsi b/arch/arm64/boot/dts/qcom/t545-initrd.dtsi
+new file mode 100644
+index 000000000..bc3f3da69
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-initrd.dtsi
+@@ -0,0 +1,6 @@
++/ {
++	chosen {
++		linux,initrd-start = /bits/ 64 <0x84b00000>;
++		linux,initrd-end = /bits/ 64 <0x84e26270>;
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-memory.dtsi b/arch/arm64/boot/dts/qcom/t545-memory.dtsi
+new file mode 100644
+index 000000000..46db9bfc6
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-memory.dtsi
+@@ -0,0 +1,8 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/ {
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0 0x80000000 0 0x80000000>,
++		      <1 0x00000000 0 0x7e2c0000>;
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-mic.dtsi b/arch/arm64/boot/dts/qcom/t545-mic.dtsi
+new file mode 100644
+index 000000000..89edb285a
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-mic.dtsi
+@@ -0,0 +1,120 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * SM-T545 built-in microphones (stock live.dts "sound" + mixer_paths.xml main-mic/sub-mic):
++ *   AMIC1 (handset/main) / AMIC3 (secondary), MIC BIAS 1 external with ext cap, 2.8 V
++ *   -> PM660L analog codec (SPMI usid 3, 0xf000) -> PDM over LPASS LPI gpio18 clk / gpio19 sync / gpio20 tx
++ *   -> LPASS digital codec (0x62ec0000) DEC1 (and DEC2 for stereo) -> I2S TX -> INT3 MI2S TX (AFE port 0x1035, SD0+SD1)
++ *   -> q6routing -> MultiMedia2.
++ * Codec MCLK = AFE INT_MCLK_0 at 9.6 MHz, switched by the digital codec only while capturing; the LPI pins and the INT3
++ * bit clock are set by sdm845.c (INT3_MI2S_TX startup). No LPASS MMIO is touched at boot.
++ * Include at the end of sdm670-samsung-gtactivexl.dts (after t545-usb.dtsi, which defines the three rails).
++ */
++
++&spmi_bus {
++	pmic@3 {
++		compatible = "qcom,pm660l", "qcom,spmi-pmic";
++		reg = <0x3 SPMI_USID>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		pm660l_codec: audio-codec@f000 {
++			compatible = "qcom,pm660l-wcd-analog-codec",
++				     "qcom,pm8916-wcd-analog-codec";
++			reg = <0xf000>;
++			interrupts = <0x3 0xf0 0x0 IRQ_TYPE_NONE>,
++				     <0x3 0xf0 0x1 IRQ_TYPE_NONE>,
++				     <0x3 0xf0 0x2 IRQ_TYPE_NONE>,
++				     <0x3 0xf0 0x3 IRQ_TYPE_NONE>,
++				     <0x3 0xf0 0x4 IRQ_TYPE_NONE>,
++				     <0x3 0xf0 0x5 IRQ_TYPE_NONE>,
++				     <0x3 0xf0 0x6 IRQ_TYPE_NONE>,
++				     <0x3 0xf0 0x7 IRQ_TYPE_NONE>,
++				     <0x3 0xf1 0x0 IRQ_TYPE_NONE>,
++				     <0x3 0xf1 0x1 IRQ_TYPE_NONE>,
++				     <0x3 0xf1 0x2 IRQ_TYPE_NONE>,
++				     <0x3 0xf1 0x3 IRQ_TYPE_NONE>,
++				     <0x3 0xf1 0x4 IRQ_TYPE_NONE>,
++				     <0x3 0xf1 0x5 IRQ_TYPE_NONE>;
++			interrupt-names = "cdc_spk_cnp_int",
++					  "cdc_spk_clip_int",
++					  "cdc_spk_ocp_int",
++					  "mbhc_ins_rem_det1",
++					  "mbhc_but_rel_det",
++					  "mbhc_but_press_det",
++					  "mbhc_ins_rem_det",
++					  "mbhc_switch_int",
++					  "cdc_ear_ocp_int",
++					  "cdc_hphr_ocp_int",
++					  "cdc_hphl_ocp_det",
++					  "cdc_ear_cnp_int",
++					  "cdc_hphr_cnp_int",
++					  "cdc_hphl_cnp_int";
++
++			/* stock cdc-vdda18-l10 (pm660 L10 1.8 V), cdc-vdd-l1 (pm660l L1 0.88 V), cdc-vdd-mic-bias (pm660l L7 3.088 V) */
++			vdd-cdc-io-supply = <&vreg_l10a_1p8>;
++			vdd-cdc-tx-rx-cx-supply = <&vreg_l1b_0p925>;
++			vdd-micbias-supply = <&vreg_l7b_3p125>;
++
++			qcom,micbias1-ext-cap;		/* stock qcom,msm-micbias1-ext-cap */
++			qcom,micbias2-ext-cap;		/* stock qcom,msm-micbias2-ext-cap */
++			qcom,micbias-lvl = <2800>;	/* stock qcom,cdc-micbias-cfilt-mv = 2800000 */
++			qcom,hphl-jack-type-normally-open;	/* stock qcom,msm-mbhc-hphl-swh = 1 */
++			qcom,gnd-jack-type-normally-open;	/* stock qcom,msm-mbhc-gnd-swh = 1 */
++
++			sound-name-prefix = "Analog";
++			#sound-dai-cells = <1>;
++		};
++	};
++};
++
++&lpass_codec {
++	/* stock qcom,msm-mclk-freq = 9600000; q6afe-clocks would default INT_MCLK_0 to 19.2 MHz */
++	assigned-clocks = <&q6afecc LPASS_CLK_ID_INT_MCLK_0 LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++	assigned-clock-rates = <9600000>;
++	status = "okay";
++};
++
++&q6asmdai {
++	dai@1 {
++		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
++	};
++};
++
++&q6afedai {
++	dai@9c {
++		reg = <INT3_MI2S_TX>;
++		/* stock qcom,msm-dai-q6-int-mi2s3: dev-id 10, msm-mi2s-tx-lines = 3 (SD0 + SD1); up to 2 channels go on SD0 */
++		qcom,sd-lines = <0 1>;
++	};
++};
++
++/ {
++	sound {
++		audio-routing = "Analog AMIC1", "Analog MIC BIAS External1",
++				"Analog AMIC3", "Analog MIC BIAS External1";
++
++		mm2-dai-link {
++			link-name = "MultiMedia2";
++
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
++			};
++		};
++
++		mic-dai-link {
++			link-name = "Internal Mic";
++
++			cpu {
++				sound-dai = <&q6afedai INT3_MI2S_TX>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&lpass_codec 1>, <&pm660l_codec 1>;
++			};
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-misc.dtsi b/arch/arm64/boot/dts/qcom/t545-misc.dtsi
+new file mode 100644
+index 000000000..120b29f9f
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-misc.dtsi
+@@ -0,0 +1,27 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * SM-T545 small peripherals: vibration motor (coin DC motor on pm660l L8, stock "msm_vibrator") and the camera flash LED
++ * (SM5705 FLED: torch-gpios/flash-gpios on the charger node, driven by sm5705-chg-t545.c).
++ */
++#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
++
++&apps_rsc {
++	regulators-1 {
++		vreg_l8b_3p3: ldo8 {
++			regulator-min-microvolt = <3300000>;
++			regulator-max-microvolt = <3312000>;
++			/* stock msm_vibrator: regulator_set_load(100 mA) before enabling, i.e. the LDO runs in HPM (it init-moded LPM otherwise) */
++			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM RPMH_REGULATOR_MODE_HPM>;
++			regulator-allow-set-load;
++			regulator-enable-ramp-delay = <250>;
++		};
++	};
++};
++
++/ {
++	vibrator {
++		compatible = "samsung,t545-vibrator";
++		vibr-supply = <&vreg_l8b_3p3>;
++	};
++
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-otg.dtsi b/arch/arm64/boot/dts/qcom/t545-otg.dtsi
+new file mode 100644
+index 000000000..ef277b070
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-otg.dtsi
+@@ -0,0 +1,65 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * USB OTG (host) on the Type-C port. Include after t545-usb.dtsi (it overrides dr_mode).
++ * - S2MM005 (stock usbpd-s2mm005@33: usbpd_int = gpio38, pinctrl ccic_irq_default = gpio, bias-disable) reports the attach;
++ * - VBUS = SM5705 boost in USB_OTG mode (stock: usb_notifier_qcom.c otg_accessory_power -> psy "otg"); the stock
++ *   vbus_dwc3-supply = PM660 "smb2-vbus" is dead there (CONFIG_QPNP_SMB2 is not set), so it is not used here;
++ * - DWC3 role switch: host while the partner is a sink, peripheral (default, adb) otherwise.
++ */
++
++&pdic {
++	interrupts-extended = <&tlmm 38 IRQ_TYPE_EDGE_FALLING>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&pdic_irq_default>;
++
++	connector {
++		compatible = "usb-c-connector";
++		label = "USB-C";
++		data-role = "dual";
++		power-role = "dual";
++		try-power-role = "sink";
++		vbus-supply = <&otg_vbus>;
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++
++				pdic_hs_ep: endpoint {
++					remote-endpoint = <&usb_1_dwc3_hs_ep>;
++				};
++			};
++		};
++	};
++};
++
++&i2c_chg {
++	charger@49 {
++		otg_vbus: usb-otg-vbus {
++			regulator-name = "usb_otg_vbus";
++		};
++	};
++};
++
++&tlmm {
++	pdic_irq_default: pdic-irq-default-state {
++		pins = "gpio38";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++};
++
++&usb_1_dwc3 {
++	dr_mode = "otg";
++	usb-role-switch;
++	role-switch-default-mode = "peripheral";
++
++	port {
++		usb_1_dwc3_hs_ep: endpoint {
++			remote-endpoint = <&pdic_hs_ep>;
++		};
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-usb.dtsi b/arch/arm64/boot/dts/qcom/t545-usb.dtsi
+new file mode 100644
+index 000000000..47f4a74fe
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-usb.dtsi
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* USB 2.0 gadget (serial console) bring-up: the rails the stock Samsung DT lists for qusb@88e2000 */
++
++&apps_rsc {
++	regulators-0 {
++		compatible = "qcom,pm660-rpmh-regulators";
++		qcom,pmic-id = "a";
++
++		vreg_l10a_1p8: ldo10 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++	};
++
++	regulators-1 {
++		compatible = "qcom,pm660l-rpmh-regulators";
++		qcom,pmic-id = "b";
++
++		vreg_l1b_0p925: ldo1 {
++			regulator-min-microvolt = <880000>;
++			regulator-max-microvolt = <900000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++
++		vreg_l7b_3p125: ldo7 {
++			regulator-min-microvolt = <3088000>;
++			regulator-max-microvolt = <3100000>;
++			regulator-enable-ramp-delay = <250>;
++		};
++	};
++};
++
++&usb_1_hsphy {
++	vdd-supply = <&vreg_l1b_0p925>;
++	vdda-pll-supply = <&vreg_l10a_1p8>;
++	vdda-phy-dpdm-supply = <&vreg_l7b_3p125>;
++};
++
++&usb_1 {
++	qcom,select-utmi-as-pipe-clk;
++};
++
++&usb_1_dwc3 {
++	dr_mode = "peripheral";
++	phys = <&usb_1_hsphy>;
++	phy-names = "usb2-phy";
++	maximum-speed = "high-speed";
++};
+diff --git a/arch/arm64/boot/dts/qcom/t545-venus.dtsi b/arch/arm64/boot/dts/qcom/t545-venus.dtsi
+new file mode 100644
+index 000000000..db9efe9bb
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/t545-venus.dtsi
+@@ -0,0 +1,21 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * SM-T545 (SDM670): Venus video codec (/dev/video* stateful decoder + encoder).
++ * Stock numbers (dt0.dts qcom,vidc0, qcom,venus@aae0000, pil_video_region) all agree with the mainline sdm670.dtsi node:
++ * reg 0xaa00000, SMMU SIDs 0x10a0/0x8 + 0x10b0, PAS id 9, memory-region 0x92e00000 + 0x500000, videocc clock/GDSC indexes.
++ *
++ * status is NOT set here: t545-disable.dtsi keeps "disabled" and the stage1 stub flips it with group "video" (groups.py, bit 13),
++ * which enables clock-controller@ab00000 and video-codec@aa00000 together. A boot without the stub needs status = "okay" on
++ * &videocc and &venus.
++ */
++
++&venus {
++	/* sdm670 resources (cp_size/cp_nonpixel_size from the stock DT); falls back to the sdm845 v2 table on a kernel without the patch */
++	compatible = "qcom,sdm670-venus", "qcom,sdm845-venus-v2";
++
++	/*
++	 * Samsung-signed image (venus.mdt + venus.b00..b04, PAS id 9) from the modem partition. firmware_class.path is /dev/t545fw, so
++	 * the init script links /vendor/firmware_mnt/image/venus.* there before the driver binds (see Venus boot flow in the report).
++	 */
++	firmware-name = "venus.mdt";
++};
+diff --git a/include/dt-bindings/clock/qcom,gcc-sdm845.h b/include/dt-bindings/clock/qcom,gcc-sdm845.h
+index d78b89926..3915022dd 100644
+--- a/include/dt-bindings/clock/qcom,gcc-sdm845.h
++++ b/include/dt-bindings/clock/qcom,gcc-sdm845.h
+@@ -228,6 +228,7 @@
+ #define GCC_USB_PHY_CFG_AHB2PHY_BCR				23
+ #define GCC_PCIE_0_PHY_BCR					24
+ #define GCC_PCIE_1_PHY_BCR					25
++#define GCC_SDCC1_BCR					26
+ 
+ /* GCC GDSCRs */
+ #define PCIE_0_GDSC						0
+-- 
+2.47.3
+

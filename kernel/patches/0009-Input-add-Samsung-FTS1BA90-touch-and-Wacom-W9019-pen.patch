@@ -1,0 +1,470 @@
+From eb2640cfaf75ee3afcdaa9a914214466bf7dd7e0 Mon Sep 17 00:00:00 2001
+From: klarnet2009 <185848556+klarnet2009@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 10:17:52 +0200
+Subject: [PATCH 09/14] Input: add Samsung FTS1BA90 touch and Wacom W9019 pen
+ drivers
+
+Drivers for the SM-T545 touch controller (FTS1BA90, protocol taken from the Samsung driver) and the Wacom W9019 pen digitizer.
+---
+ drivers/input/touchscreen/Kconfig            |  12 +
+ drivers/input/touchscreen/Makefile           |   2 +
+ drivers/input/touchscreen/fts1ba90-t545.c    | 233 +++++++++++++++++++
+ drivers/input/touchscreen/wacom-w9019-t545.c | 173 ++++++++++++++
+ 4 files changed, 420 insertions(+)
+ create mode 100644 drivers/input/touchscreen/fts1ba90-t545.c
+ create mode 100644 drivers/input/touchscreen/wacom-w9019-t545.c
+
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index 7d5b72ee0..9660603ef 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -1250,6 +1250,18 @@ config TOUCHSCREEN_ST1232
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called st1232_ts.
+ 
++config TOUCHSCREEN_FTS1BA90_T545
++	tristate "STMicroelectronics FTS1BA90 touchscreen of the SM-T545"
++	depends on I2C
++	help
++	  Touch controller of the Samsung Galaxy Tab Active Pro LTE.
++
++config TOUCHSCREEN_WACOM_W9019_T545
++	tristate "Wacom W9019 pen digitizer of the SM-T545"
++	depends on I2C
++	help
++	  Pen digitizer of the Samsung Galaxy Tab Active Pro LTE.
++
+ config TOUCHSCREEN_STMFTS
+ 	tristate "STMicroelectronics STMFTS touchscreen"
+ 	depends on I2C
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index ab9abd151..bd02db7a5 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -120,3 +120,5 @@ obj-$(CONFIG_TOUCHSCREEN_IQS5XX)	+= iqs5xx.o
+ obj-$(CONFIG_TOUCHSCREEN_IQS7211)	+= iqs7211.o
+ obj-$(CONFIG_TOUCHSCREEN_ZINITIX)	+= zinitix.o
+ obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83112B)	+= himax_hx83112b.o
++obj-$(CONFIG_TOUCHSCREEN_FTS1BA90_T545)	+= fts1ba90-t545.o
++obj-$(CONFIG_TOUCHSCREEN_WACOM_W9019_T545)	+= wacom-w9019-t545.o
+diff --git a/drivers/input/touchscreen/fts1ba90-t545.c b/drivers/input/touchscreen/fts1ba90-t545.c
+new file mode 100644
+index 000000000..c438269d0
+--- /dev/null
++++ b/drivers/input/touchscreen/fts1ba90-t545.c
+@@ -0,0 +1,233 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * STMicroelectronics FTS1BA90 touch controller of the Samsung Galaxy Tab Active Pro (SM-T545).
++ * The protocol (8 byte events read with 0x60/0x61, system reset, sense on) is the one of Samsung's fts1ba90 driver; only
++ * finger touches are handled, the controller keeps the firmware it has in its flash.
++ */
++
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++
++#define FTS_EVENT_SIZE		8
++#define FTS_FIFO_MAX		32
++#define FTS_FINGER_MAX		10
++
++#define FTS_CMD_SENSE_ON	0x10
++#define FTS_CMD_SET_TOUCHTYPE	0x30
++#define FTS_CMD_READ_ONE_EVENT	0x60
++#define FTS_CMD_READ_ALL_EVENT	0x61
++#define FTS_CMD_CLEAR_EVENTS	0x62
++
++#define FTS_EID_COORDINATE	0
++#define FTS_EID_STATUS		1
++#define FTS_ACT_PRESS		1
++#define FTS_ACT_MOVE		2
++#define FTS_ACT_RELEASE		3
++
++#define FTS_STYPE_INFORMATION	2
++#define FTS_INFO_READY		0x00
++
++/* touch | palm | wet, as in the stock driver */
++#define FTS_TOUCHTYPE_DEFAULT	0x61
++
++struct fts_t545 {
++	struct i2c_client *client;
++	struct input_dev *input;
++};
++
++static int fts_read(struct i2c_client *c, u8 reg, u8 *buf, int len)
++{
++	struct i2c_msg msg[2] = {
++		{ .addr = c->addr, .flags = 0, .len = 1, .buf = &reg },
++		{ .addr = c->addr, .flags = I2C_M_RD, .len = len, .buf = buf },
++	};
++	int ret = i2c_transfer(c->adapter, msg, 2);
++
++	return ret == 2 ? 0 : (ret < 0 ? ret : -EIO);
++}
++
++static int fts_write(struct i2c_client *c, const u8 *buf, int len)
++{
++	int ret = i2c_master_send(c, buf, len);
++
++	return ret == len ? 0 : (ret < 0 ? ret : -EIO);
++}
++
++/*
++ * The controller reports a landscape frame (x 0..1919 along the long side, y 0..1199), the panel scans out 1200x1920 portrait: swap the axes.
++ * Which corner is the origin is only known by trying, so swap/invert are tunable at run time
++ * (/sys/module/fts1ba90_t545/parameters/{swap_xy,inv_x,inv_y}).
++ */
++static bool swap_xy = true;
++static bool inv_x;
++static bool inv_y = true;	/* checked on the tablet: with swap_xy alone a finger moving up was reported moving down */
++module_param(swap_xy, bool, 0644);
++module_param(inv_x, bool, 0644);
++module_param(inv_y, bool, 0644);
++
++static void fts_map(unsigned int rx, unsigned int ry, int *px, int *py)
++{
++	int x = swap_xy ? ry : rx, y = swap_xy ? rx : ry;
++
++	x = clamp(x, 0, 1199);
++	y = clamp(y, 0, 1919);
++	*px = inv_x ? 1199 - x : x;
++	*py = inv_y ? 1919 - y : y;
++}
++
++static irqreturn_t fts_irq(int irq, void *data)
++{
++	struct fts_t545 *ts = data;
++	struct input_dev *input = ts->input;
++	u8 buf[FTS_FIFO_MAX * FTS_EVENT_SIZE];
++	int left, i, count;
++
++	if (fts_read(ts->client, FTS_CMD_READ_ONE_EVENT, buf, FTS_EVENT_SIZE))
++		return IRQ_HANDLED;
++
++	left = buf[7] & 0x3f;
++	if (left >= FTS_FIFO_MAX)
++		left = FTS_FIFO_MAX - 1;
++	if (left && fts_read(ts->client, FTS_CMD_READ_ALL_EVENT, buf + FTS_EVENT_SIZE, left * FTS_EVENT_SIZE))
++		left = 0;
++	count = left + 1;
++
++	for (i = 0; i < count; i++) {
++		const u8 *ev = buf + i * FTS_EVENT_SIZE;
++		unsigned int tid, action, x, y;
++
++		if ((ev[0] & 3) != FTS_EID_COORDINATE)
++			continue;
++
++		tid = (ev[0] >> 2) & 0xf;
++		action = ev[0] >> 6;
++		if (tid >= FTS_FINGER_MAX)
++			continue;
++
++		x = (ev[1] << 4) | (ev[3] >> 4);
++		y = (ev[2] << 4) | (ev[3] & 0xf);
++
++		input_mt_slot(input, tid);
++		if (action == FTS_ACT_PRESS || action == FTS_ACT_MOVE) {
++			input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
++			int px, py;
++
++			fts_map(x, y, &px, &py);
++			input_report_abs(input, ABS_MT_POSITION_X, px);
++			input_report_abs(input, ABS_MT_POSITION_Y, py);
++			input_report_abs(input, ABS_MT_TOUCH_MAJOR, ev[4]);
++			input_report_abs(input, ABS_MT_TOUCH_MINOR, ev[5]);
++			input_report_abs(input, ABS_MT_PRESSURE, ev[6] & 0x3f);
++		} else if (action == FTS_ACT_RELEASE) {
++			input_mt_report_slot_state(input, MT_TOOL_FINGER, false);
++		}
++	}
++	input_mt_sync_frame(input);
++	input_sync(input);
++
++	return IRQ_HANDLED;
++}
++
++static int fts_start(struct fts_t545 *ts)
++{
++	struct i2c_client *c = ts->client;
++	static const u8 sysreset[] = { 0xfa, 0x20, 0x00, 0x00, 0x24, 0x81 };
++	u8 ev[FTS_EVENT_SIZE];
++	u8 cmd[3];
++	int i, ret;
++
++	ret = fts_write(c, sysreset, sizeof(sysreset));
++	if (ret) {
++		dev_err(&c->dev, "system reset failed: %d\n", ret);
++		return ret;
++	}
++	msleep(10);
++
++	/* wait for the "controller ready" status event */
++	for (i = 0; i < 100; i++) {
++		if (!fts_read(c, FTS_CMD_READ_ONE_EVENT, ev, sizeof(ev)) &&
++		    (ev[0] & 3) == FTS_EID_STATUS && ((ev[0] >> 2) & 0xf) == FTS_STYPE_INFORMATION &&
++		    ev[1] == FTS_INFO_READY)
++			break;
++		msleep(20);
++	}
++	if (i == 100) {
++		dev_err(&c->dev, "controller did not report ready\n");
++		return -ETIMEDOUT;
++	}
++
++	cmd[0] = FTS_CMD_CLEAR_EVENTS;
++	fts_write(c, cmd, 1);
++
++	cmd[0] = FTS_CMD_SET_TOUCHTYPE;
++	cmd[1] = FTS_TOUCHTYPE_DEFAULT;
++	cmd[2] = 0;
++	fts_write(c, cmd, 3);
++
++	cmd[0] = FTS_CMD_SENSE_ON;
++	return fts_write(c, cmd, 1);
++}
++
++static int fts_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct fts_t545 *ts;
++	u32 max_x = 1200, max_y = 1920;
++	int ret;
++
++	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
++	if (!ts)
++		return -ENOMEM;
++	ts->client = client;
++	i2c_set_clientdata(client, ts);
++
++	device_property_read_u32(dev, "touchscreen-size-x", &max_x);
++	device_property_read_u32(dev, "touchscreen-size-y", &max_y);
++
++	ts->input = devm_input_allocate_device(dev);
++	if (!ts->input)
++		return -ENOMEM;
++	ts->input->name = "fts1ba90-t545";
++	ts->input->id.bustype = BUS_I2C;
++	input_set_abs_params(ts->input, ABS_MT_POSITION_X, 0, max_x - 1, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_POSITION_Y, 0, max_y - 1, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_TOUCH_MINOR, 0, 255, 0, 0);
++	input_set_abs_params(ts->input, ABS_MT_PRESSURE, 0, 63, 0, 0);
++	ret = input_mt_init_slots(ts->input, FTS_FINGER_MAX, INPUT_MT_DIRECT);
++	if (ret)
++		return ret;
++
++	ret = fts_start(ts);
++	if (ret)
++		return ret;
++
++	ret = devm_request_threaded_irq(dev, client->irq, NULL, fts_irq, IRQF_ONESHOT, "fts1ba90-t545", ts);
++	if (ret)
++		return dev_err_probe(dev, ret, "irq\n");
++
++	return input_register_device(ts->input);
++}
++
++static const struct of_device_id fts_of_match[] = {
++	{ .compatible = "st,fts1ba90-t545" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, fts_of_match);
++
++static struct i2c_driver fts_driver = {
++	.driver = {
++		.name = "fts1ba90-t545",
++		.of_match_table = fts_of_match,
++	},
++	.probe = fts_probe,
++};
++module_i2c_driver(fts_driver);
++
++MODULE_DESCRIPTION("FTS1BA90 touch controller of the SM-T545");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/input/touchscreen/wacom-w9019-t545.c b/drivers/input/touchscreen/wacom-w9019-t545.c
+new file mode 100644
+index 000000000..2733e7344
+--- /dev/null
++++ b/drivers/input/touchscreen/wacom-w9019-t545.c
+@@ -0,0 +1,173 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Wacom W9019 pen digitizer of the Samsung Galaxy Tab Active Pro (SM-T545).
++ * Report format and start sequence are the ones of Samsung's wacom_i2c driver (14 byte reports read after every interrupt).
++ * The controller keeps its firmware in flash, no firmware update is done here.
++ */
++
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#define W9019_REPORT_LEN	14
++#define W9019_CMD_STOP		0x30
++#define W9019_CMD_START		0x31
++
++struct w9019 {
++	struct i2c_client *client;
++	struct input_dev *input;
++	u32 max_x, max_y;	/* digitizer units before the axis change */
++	bool x_invert, y_invert, xy_switch;
++	bool in_range;
++	unsigned int tool;
++};
++
++static void w9019_release(struct w9019 *w)
++{
++	struct input_dev *in = w->input;
++
++	input_report_key(in, BTN_STYLUS, 0);
++	input_report_key(in, BTN_TOUCH, 0);
++	input_report_abs(in, ABS_PRESSURE, 0);
++	input_report_abs(in, ABS_DISTANCE, 0);
++	input_report_key(in, BTN_TOOL_RUBBER, 0);
++	input_report_key(in, BTN_TOOL_PEN, 0);
++	input_sync(in);
++	w->in_range = false;
++}
++
++static irqreturn_t w9019_irq(int irq, void *data)
++{
++	struct w9019 *w = data;
++	struct input_dev *in = w->input;
++	u8 d[W9019_REPORT_LEN];
++	int x, y, pressure;
++	int ret;
++
++	ret = i2c_master_recv(w->client, d, sizeof(d));
++	if (ret != sizeof(d))
++		return IRQ_HANDLED;
++
++	if (!(d[0] & 0x80)) {	/* pen left the range */
++		if (w->in_range)
++			w9019_release(w);
++		return IRQ_HANDLED;
++	}
++
++	x = (d[1] << 8) | d[2];
++	y = (d[3] << 8) | d[4];
++	pressure = (d[5] << 8) | d[6];
++
++	if (w->x_invert)
++		x = w->max_x - x;
++	if (w->y_invert)
++		y = w->max_y - y;
++	if (w->xy_switch)
++		swap(x, y);
++
++	if (!w->in_range)
++		w->tool = (d[0] & 0x40) ? BTN_TOOL_RUBBER : BTN_TOOL_PEN;
++	w->in_range = true;
++
++	input_report_abs(in, ABS_X, x);
++	input_report_abs(in, ABS_Y, y);
++	input_report_key(in, BTN_STYLUS, !!(d[0] & 0x20));
++	input_report_key(in, BTN_TOUCH, !!(d[0] & 0x10));
++	input_report_abs(in, ABS_PRESSURE, pressure);
++	input_report_abs(in, ABS_DISTANCE, d[7]);
++	input_report_abs(in, ABS_TILT_X, (s8)d[9]);
++	input_report_abs(in, ABS_TILT_Y, -(s8)d[8]);
++	input_report_key(in, w->tool, 1);
++	input_sync(in);
++
++	return IRQ_HANDLED;
++}
++
++static int w9019_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct regulator *vdd;
++	struct w9019 *w;
++	u32 max_pressure = 4095, max_height = 255, max_tilt = 63;
++	u8 cmd;
++	int ret;
++
++	w = devm_kzalloc(dev, sizeof(*w), GFP_KERNEL);
++	if (!w)
++		return -ENOMEM;
++	w->client = client;
++	w->max_x = 21658;
++	w->max_y = 13536;
++	device_property_read_u32(dev, "wacom,max-x", &w->max_x);
++	device_property_read_u32(dev, "wacom,max-y", &w->max_y);
++	device_property_read_u32(dev, "wacom,max-pressure", &max_pressure);
++	device_property_read_u32(dev, "wacom,max-height", &max_height);
++	device_property_read_u32(dev, "wacom,max-tilt", &max_tilt);
++	w->x_invert = device_property_read_bool(dev, "wacom,x-invert");
++	w->y_invert = device_property_read_bool(dev, "wacom,y-invert");
++	w->xy_switch = device_property_read_bool(dev, "wacom,xy-switch");
++
++	vdd = devm_regulator_get(dev, "vdd");
++	if (IS_ERR(vdd))
++		return dev_err_probe(dev, PTR_ERR(vdd), "vdd\n");
++	ret = regulator_enable(vdd);
++	if (ret)
++		return ret;
++	msleep(200);
++
++	w->input = devm_input_allocate_device(dev);
++	if (!w->input)
++		return -ENOMEM;
++	w->input->name = "w9019-t545";
++	w->input->id.bustype = BUS_I2C;
++	input_set_capability(w->input, EV_KEY, BTN_TOUCH);
++	input_set_capability(w->input, EV_KEY, BTN_STYLUS);
++	input_set_capability(w->input, EV_KEY, BTN_TOOL_PEN);
++	input_set_capability(w->input, EV_KEY, BTN_TOOL_RUBBER);
++	/* ABS_X/Y are given after the axis change */
++	input_set_abs_params(w->input, ABS_X, 0, w->xy_switch ? w->max_y : w->max_x, 4, 0);
++	input_set_abs_params(w->input, ABS_Y, 0, w->xy_switch ? w->max_x : w->max_y, 4, 0);
++	input_set_abs_params(w->input, ABS_PRESSURE, 0, max_pressure, 0, 0);
++	input_set_abs_params(w->input, ABS_DISTANCE, 0, max_height, 0, 0);
++	input_set_abs_params(w->input, ABS_TILT_X, -max_tilt, max_tilt, 0, 0);
++	input_set_abs_params(w->input, ABS_TILT_Y, -max_tilt, max_tilt, 0, 0);
++	__set_bit(INPUT_PROP_DIRECT, w->input->propbit);
++
++	/* stop, then start the scan as the stock driver does */
++	cmd = W9019_CMD_STOP;
++	i2c_master_send(client, &cmd, 1);
++	msleep(60);
++	cmd = W9019_CMD_START;
++	ret = i2c_master_send(client, &cmd, 1);
++	if (ret != 1)
++		return dev_err_probe(dev, ret < 0 ? ret : -EIO, "start scan\n");
++	msleep(60);
++
++	ret = devm_request_threaded_irq(dev, client->irq, NULL, w9019_irq, IRQF_ONESHOT, "w9019-t545", w);
++	if (ret)
++		return dev_err_probe(dev, ret, "irq\n");
++
++	return input_register_device(w->input);
++}
++
++static const struct of_device_id w9019_of_match[] = {
++	{ .compatible = "wacom,w9019-t545" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, w9019_of_match);
++
++static struct i2c_driver w9019_driver = {
++	.driver = {
++		.name = "w9019-t545",
++		.of_match_table = w9019_of_match,
++	},
++	.probe = w9019_probe,
++};
++module_i2c_driver(w9019_driver);
++
++MODULE_DESCRIPTION("Wacom W9019 digitizer of the SM-T545");
++MODULE_LICENSE("GPL");
+-- 
+2.47.3
+
