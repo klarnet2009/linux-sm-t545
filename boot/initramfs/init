@@ -1,0 +1,289 @@
+#!/bin/busybox sh
+# minimal initramfs for the SM-T545 mainline proof of life
+/bin/busybox --install -s /bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+# the apps watchdog armed by Android/LK bites 30 s after its last pet and the in-kernel keepalive does not run (no HW_RUNNING): feed it
+for w in /dev/watchdog0 /dev/watchdog; do
+  if [ -c $w ]; then ( exec 3>$w; while true; do echo 1 >&3; sleep 4; done ) & WDPID=$!; break; fi
+done
+mount -t configfs none /sys/kernel/config 2>/dev/null
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+
+# SM5705 MUIC (i2c-gpio "chg" bus, 0x25): record what the previous boot stage left (is the USB data path configured?)
+muic_dump() {
+  b=""
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    for d in /sys/class/i2c-dev/i2c-*; do
+      [ -e "$d" ] || continue
+      case "$(readlink -f $d/device/..)" in *i2c-gpio-chg) b=${d##*-};; esac
+    done
+    [ -n "$b" ] && break
+    sleep 1
+  done
+  [ -n "$b" ] || { say "muic: no chg bus"; return; }
+  s=""
+  for r in 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f; do
+    s="$s $r=$(i2cget -f -y $b 0x25 0x$r 2>&1)"
+  done
+  say "muic bus $b regs:$s"
+  say "muic gpios: $(grep -E 'gpio(50|98) ' /sys/kernel/debug/gpio | tr '
+' ' ')"
+  # the working (Android-configured) state seen after kexec: gpio98 low and CNTL (reg 02) = 0x1e; LK leaves gpio98 high and 0x1a
+  devmem 0x3562004 32 0
+  i2cset -f -y $b 0x25 0x02 0x1e
+  [ -n "$ANDROID" ] || sleep 1	# (settle before the read-back below, which is only logged: Android boots do not wait for it)
+  say "muic after fix: 02=$(i2cget -f -y $b 0x25 0x02) 09=$(i2cget -f -y $b 0x25 0x09) 0a=$(i2cget -f -y $b 0x25 0x0a) $(grep -E 'gpio98 ' /sys/kernel/debug/gpio)"
+  # the gadget was bound before the MUIC connected D+/D-: re-bind the UDC so that the host sees a fresh connect
+  # Android sets up its own gadget later: do not wait for this one (it cost 10 s of every boot)
+  n=10; grep -q "t545.android=1" /proc/cmdline && n=0
+  for i in $(seq 1 $n); do
+    u=$(cat /sys/kernel/config/usb_gadget/g1/UDC 2>/dev/null)
+    [ -n "$u" ] && break
+    sleep 1
+  done
+  if [ -n "$u" ]; then
+    echo "" > /sys/kernel/config/usb_gadget/g1/UDC
+    sleep 1
+    echo "$u" > /sys/kernel/config/usb_gadget/g1/UDC
+    say "muic: re-bound UDC $u, state $(cat /sys/class/udc/$u/state 2>&1)"
+  else
+    say "muic: gadget g1 has no UDC yet"
+  fi
+}
+
+say() { echo "$*" > /dev/tty0 2>/dev/null; echo "t545-init: $*" > /dev/kmsg 2>/dev/null; }
+
+say "=============================================="
+if grep -q 't545.android=1' /proc/cmdline; then ANDROID=1; else ( muic_dump ) & fi
+say " SM-T545 mainline proof of life"
+say " kernel $(uname -r)  $(uname -m)"
+say " cmdline: $(cat /proc/cmdline | cut -c1-120)"
+say " memory: $(grep MemTotal /proc/meminfo)"
+say " cpus online: $(cat /sys/devices/system/cpu/online)"
+say "=============================================="
+
+# The previous boot of this image died (the stub counts boots in scratch DRAM word 1): do not start Android again, put the dead boot's
+# console tail (pstore keeps only the last boot) into this boot's log and stay in the debug init, which t545.dl later sends to Download.
+BOOTS=$(devmem 0xa0f00004 32 2>/dev/null)
+# (from the 3rd such boot: a reboot before postboot reset the count, e.g. during start-up, is not a death; the stub also restarts the
+# count after a clean reboot, when it can still recognise it in the console log that came through the reset)
+if [ -n "$ANDROID" ] && [ $((BOOTS)) -ge 3 ] 2>/dev/null; then
+  say "android: boot #$BOOTS, the previous Android boot died; dumping its console tail, staying in the debug init"
+  grep -v -E "gpi |geni_i2c|driver_bound|really_probe|__driver_probe|t545dbg|msm_dsi|dpu" /sys/fs/pstore/console-ramoops-0 | tail -450 | cut -c1-180 | while read l; do echo "t545-prev: $l" > /dev/kmsg; done
+  # keep the whole previous console on the real /cache partition (readable from stock Android afterwards; a hard reset loses the RAM copy)
+  mkdir -p /mnt/cache
+  if mount -t ext4 /dev/mmcblk0p53 /mnt/cache 2>/dev/null; then
+    mkdir -p /mnt/cache/t545
+    cp /sys/fs/pstore/console-ramoops-0 /mnt/cache/t545/prev_console_boot$((BOOTS)).txt 2>/dev/null
+    [ -e /sys/fs/pstore/dmesg-ramoops-0 ] && cp /sys/fs/pstore/dmesg-ramoops-0 /mnt/cache/t545/prev_dmesg_boot$((BOOTS)).txt
+    sync; umount /mnt/cache
+    say "android: previous console saved to /cache/t545/prev_console_boot$((BOOTS)).txt"
+  fi
+  ANDROID=""
+  ( muic_dump ) &
+fi
+
+# Android mode (t545.android=1): find the "system" partition (system-as-root image), mount it and hand over to Android's init.
+if [ -n "$ANDROID" ]; then
+  muic_dump
+  for d in a6f8800.usb a600000.dwc3 88e2000.phy; do echo on > /sys/bus/platform/devices/$d/power/control 2>/dev/null; done
+  sysdev=""
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    for p in /sys/class/block/mmcblk0p*; do
+      [ -e "$p/uevent" ] || continue
+      grep -q '^PARTNAME=system$' "$p/uevent" && sysdev=/dev/${p##*/}
+    done
+    [ -n "$sysdev" ] && break
+    sleep 1
+  done
+  say "android: system partition = $sysdev"
+  # system is EROFS since LKM927 (25.10); ext4 still mounts, so an old ext4 system image keeps booting
+  if [ -n "$sysdev" ] && mkdir -p /mnt/sys && { mount -t erofs -o ro "$sysdev" /mnt/sys 2>/dev/null || mount -t ext4 -o ro "$sysdev" /mnt/sys; }; then
+    say "android: system mounted, $(ls /mnt/sys | wc -l) entries, init -> $(readlink /mnt/sys/init)"
+    # test overlay of /system/etc/init (tmpfs copy bind-mounted over the read-only original, the partition stays untouched):
+    # no TrustZone keystore on mainline -> do not wait for keystore2's module hash, and send the Android log to the kernel log (pstore)
+    mkdir -p /ovl && mount -t tmpfs tmpfs /ovl && cp -a /mnt/sys/system/etc/init /ovl/init 2>/dev/null
+    if [ -f /ovl/init/hw/init.rc ]; then
+      sed -i 's/^\([ \t]*wait_for_prop keystore.module_hash.sent true\)/#\1/' /ovl/init/hw/init.rc
+      sed -i -e '/^on early-init$/a\    restorecon_recursive /system/etc/selinux' -e '/^on early-init$/a\    restorecon_recursive /system/etc/init' -e '/^on early-init$/a\    restorecon_recursive /system/etc/permissions' -e '/^on early-init$/a\    restorecon_recursive /system/etc/bpf' /ovl/init/hw/init.rc
+      # boot time: init.rc's early-fs "start vold" forks right before apex-setup.rc (phh) mounts a fresh tmpfs over /apex for its second
+      # apexd --bootstrap; vold's exec then fails (ENOENT: no linker) and init restarts it 5 s later while "vdc checkpoint
+      # markBootAttempt" in post-fs waits for it. Start vold from an early-fs action that runs after apex-setup.rc's.
+      sed -i '/^on early-fs$/,/^$/{/^    start vold$/d}' /ovl/init/hw/init.rc
+      printf '\n# t545 (initramfs init): after apex-setup.rc, see there\non early-fs\n    start vold\n' >> /ovl/init/zz_vold_retry.rc
+      # software KeyMint + /data on zram + VINTF fragment (see km/t545-prep.sh, km/zz_t545_km.rc)
+      # (init parses every regular file of /system/etc/init as an rc file, so all of it goes into a subdirectory)
+      mkdir -p /ovl/init/t545/vintf
+      cp /km/vintf/*.xml /ovl/init/t545/vintf/
+      cp /km/t545-keymint-service /ovl/init/t545/keymint-service
+      cp /km/t545-prep.sh /ovl/init/t545/prep.sh
+      cp /km/manifest.xml /km/adb_keys /ovl/init/t545/
+      cp /km/t545-usb.sh /ovl/init/t545/usb.sh
+      cp /km/t545-usblog.sh /ovl/init/t545/usblog.sh
+      cp /km/t545-charger.sh /ovl/init/t545/charger.sh
+      cp /km/t545-hexagonrpcd /ovl/init/t545/hexagonrpcd
+      cp /km/audio_policy_configuration.xml /ovl/init/t545/
+      cp /km/libhexagonrpc.so /ovl/init/t545/
+      chmod 755 /ovl/init/t545/hexagonrpcd
+      cp /km/t545-gfx.sh /ovl/init/t545/gfx.sh
+      cp /km/t545-postboot.sh /ovl/init/t545/postboot.sh
+      cp /km/t545-jack.sh /ovl/init/t545/jack.sh
+      cp /km/t545-vibrator-service /ovl/init/t545/vibrator-service
+      cp /km/t545-light-service /ovl/init/t545/light-service && chmod 755 /ovl/init/t545/light-service
+      chmod 755 /ovl/init/t545/vibrator-service
+      cp /km/t545-seccomp.sh /ovl/init/t545/seccomp.sh
+      cp /km/T545*Overlay.apk /ovl/init/t545/
+      cp /km/t545-modem.sh /ovl/init/t545/modem.sh
+      cp /km/t545-rmtfs /ovl/init/t545/rmtfs
+      cp /km/t545-tqftpserv /ovl/init/t545/tqftpserv
+      cp /km/ath10k/firmware-5.bin /ovl/init/t545/
+      chmod 755 /ovl/init/t545/rmtfs /ovl/init/t545/tqftpserv
+      cp /km/t545-bluetooth-hal /ovl/init/t545/bluetooth-hal
+      cp /km/android.hardware.bluetooth-V1-ndk.so /ovl/init/t545/
+      chmod 755 /ovl/init/t545/bluetooth-hal
+      cp /km/t545-cachelog.sh /ovl/init/t545/cachelog.sh
+      [ -f /km/t545-auditrate ] && cp /km/t545-auditrate /ovl/init/t545/auditrate && chmod 755 /ovl/init/t545/auditrate
+      cp /km/zz_t545_gfx.rc /km/zz_t545_stubs.rc /ovl/init/
+      cp /km/zz_t545_km.rc /ovl/init/
+      cp /km/zz_t545_v4l2c2.rc /ovl/init/
+      # zram swap (there was none: lmkd kill storms when a game starts): the GSI's zz_zram.rc writes comp_algorithm lz4 (the kernel
+      # has lzo/lzo-rle only) and its fstab.zram makes fs_mgr write max_comp_streams, which kernel 6.x no longer has, so swapon_all
+      # skipped zram. fs_mgr writes that attribute unless the value is negative (default 0), hence max_comp_streams=-1.
+      cp /km/zz_zram.rc /ovl/init/zz_zram.rc && cp /km/t545-fstab.zram /ovl/init/t545/fstab.zram
+      # boot time: phh's rw-system.sh (post-fs exec in vndk.rc) without its /sys-wide find for a Focaltech node (~2 s on mainline)
+      # (km/t545-rw-head.sh after its first line: an optional execution trace with timestamps)
+      RW=/mnt/sys/system/bin/rw-system.sh
+      cp /bin/busybox /ovl/init/t545/busybox && chmod 755 /ovl/init/t545/busybox	# its grep (static: no linker start-up)
+      if { head -n 1 $RW; cat /km/t545-rw-head.sh; tail -n +2 $RW | sed '/find \/sys -name fts_gesture_mode/,/^done$/d'; } > /ovl/init/t545/rw-system.sh && [ -s /ovl/init/t545/rw-system.sh ]; then
+        chmod 755 /ovl/init/t545/rw-system.sh
+        sed -i 's#^\(    exec - root -- \)/system/bin/rw-system.sh$#\1/system/etc/init/t545/rw-system.sh#' /ovl/init/vndk.rc
+      fi
+      # SELinux: the platform policy with the kernel 6.x permissions of class system (else every firmware load is denied in
+      # enforcing) and our types, domains and labels (km/sepolicy); init compiles it at boot (the vendor's precompiled policy
+      # is for the stock A11 system and never matches)
+      mkdir -p /ovl/sel && cp -a /mnt/sys/system/etc/selinux/. /ovl/sel/ &&
+        sed -i "s/^(class system (ipc_info syslog_read syslog_mod syslog_console module_request module_load ))$/(class system (ipc_info syslog_read syslog_mod syslog_console module_request module_load firmware_load kexec_image_load kexec_initramfs_load policy_load x509_certificate_load ))/" /ovl/sel/plat_sepolicy.cil &&
+        grep -q "module_load firmware_load" /ovl/sel/plat_sepolicy.cil &&
+        cat /km/sepolicy/t545_base.cil /km/sepolicy/t545_rules.cil /km/sepolicy/t545_rules2.cil /km/sepolicy/t545_rules3.cil /km/sepolicy/t545_rules4.cil /km/sepolicy/t545_manual.cil >> /ovl/sel/plat_sepolicy.cil && { [ -f /km/sepolicy/t545_enftest.cil ] && cat /km/sepolicy/t545_enftest.cil >> /ovl/sel/plat_sepolicy.cil || true; } &&
+        cat /km/sepolicy/t545_file_contexts >> /ovl/sel/plat_file_contexts &&
+        mount --bind /ovl/sel /mnt/sys/system/etc/selinux && say "android: SELinux policy + t545 rules"
+      # no fingerprint HAL on mainline (TrustZone): without the feature system_server does not look for the virtual HAL every second
+      mkdir -p /ovl/perm && cp -a /mnt/sys/system/etc/permissions/. /ovl/perm/ && rm -f /ovl/perm/android.hardware.fingerprint.xml &&
+        mount --bind /ovl/perm /mnt/sys/system/etc/permissions && say "android: permissions without android.hardware.fingerprint"
+      # no timeInState BPF program: system_server attaches it to the sched_switch tracepoint and the kernel panics on a kCFI check in
+      # perf_trace_run_bpf_submit (the per-app CPU time tracking it serves already failed to start in the permissive images)
+      mkdir -p /ovl/bpf && cp -a /mnt/sys/system/etc/bpf/. /ovl/bpf/ && rm -f /ovl/bpf/timeInState* &&
+        mount --bind /ovl/bpf /mnt/sys/system/etc/bpf && say "android: bpf programs without timeInState"
+      cp /km/t545-venus.sh /ovl/init/t545/venus.sh
+      chmod 755 /ovl/init/t545/keymint-service
+      cat > /ovl/init/zz_t545_debug.rc <<'EOF'
+service t545_logcat /system/bin/sh -c "/system/bin/logcat -b main,system,crash -v threadtime vold:I keystore2:I servicemanager:W libc:F DEBUG:V init:W *:W > /dev/kmsg 2>&1"
+    class core
+    user root
+    group root log
+    oneshot
+on early-init
+    symlink /dev/block /dev/block/bootdevice
+on init
+    # (t545_logcat -> /dev/kmsg flooded the console; /cache/t545/logcat.txt replaces it)
+EOF
+      mount --bind /ovl/init /mnt/sys/system/etc/init
+      say "android: overlay of /system/etc/init mounted"
+    fi
+    # Android's first-stage init mounts proc and sysfs itself (a moved, pre-mounted /sys made its mount fail with EBUSY): hand over /dev only
+    # Android's own logs and the SELinux denial flood used to be printed on the framebuffer console, competing with SurfaceFlinger for the display and
+    # the CPUs (ignore_loglevel is on the command line): back to warnings, and detach fbcon from the panel for good
+    echo 0 > /sys/module/printk/parameters/ignore_loglevel 2>/dev/null
+    echo "4 4 1 4" > /proc/sys/kernel/printk 2>/dev/null
+    for v in /sys/class/vtconsole/vtcon*; do
+      case "$(cat $v/name 2>/dev/null)" in *frame*) echo 0 > $v/bind 2>/dev/null;; esac
+    done
+    # after switch_root the feeder's "sleep" cannot be executed any more (the initramfs is gone) and the loop spins at ~340 forks/s, eating a CPU;
+    # with t545.dl the kernel (t545-dltimer.c) pets the apps watchdog itself
+    grep -q 't545.dl=' /proc/cmdline && [ -n "$WDPID" ] && kill $WDPID 2>/dev/null
+    umount /sys/kernel/config /sys/fs/pstore /sys/kernel/debug 2>/dev/null
+    mount --move /dev /mnt/sys/dev
+    umount -l /proc 2>/dev/null
+    umount -l /sys 2>/dev/null
+    exec switch_root /mnt/sys /init
+  fi
+  say "android: switch failed, staying in the debug init"
+fi
+
+# USB serial console over a gadget ACM function. The dwc3 controller probes late (clocks, rails, interconnects), so wait for it.
+(
+  n=0
+  UDC=
+  while [ $n -lt 70 ]; do
+    UDC=$(ls /sys/class/udc 2>/dev/null | head -1)
+    [ -n "$UDC" ] && break
+    n=$((n+1)); sleep 1
+  done
+  # nothing tells the kernel that a cable is plugged in (no charger/PD driver), so keep the controller and PHY powered
+  for d in a6f8800.usb a600000.dwc3 88e2000.phy; do
+    echo on > /sys/bus/platform/devices/$d/power/control 2>/dev/null
+    echo "t545-pm: $d control=$(cat /sys/bus/platform/devices/$d/power/control 2>&1) status=$(cat /sys/bus/platform/devices/$d/power/runtime_status 2>&1)" > /dev/kmsg
+  done
+  if [ -n "$UDC" ] && [ -d /sys/kernel/config/usb_gadget ]; then
+    G=/sys/kernel/config/usb_gadget/g1
+    mkdir -p $G && cd $G
+    echo 0x18d1 > idVendor; echo 0x4ee0 > idProduct
+    mkdir -p strings/0x409; echo T545 > strings/0x409/product; echo mainline-poc > strings/0x409/serialnumber
+    mkdir -p functions/acm.usb0 configs/c.1
+    ln -s functions/acm.usb0 configs/c.1/
+    echo "$UDC" > UDC
+    say "USB gadget ACM up on $UDC after $n s -> /dev/ttyGS0"
+    mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+    usbdump() {
+      for f in /sys/class/udc/$UDC/state /sys/class/udc/$UDC/current_speed /sys/class/udc/$UDC/maximum_speed; do
+        echo "t545-udc[$1]: $f = $(cat $f 2>&1)" > /dev/kmsg
+      done
+      for f in mode link_state; do
+        echo "t545-dwc3[$1]: $f = $(cat /sys/kernel/debug/usb/a600000.dwc3/$f 2>&1)" > /dev/kmsg
+      done
+      cat /sys/kernel/debug/usb/a600000.dwc3/regdump 2>&1 | while read l; do echo "t545-regdump[$1]: $l" > /dev/kmsg; done
+    }
+    for d in a6f8800.usb a600000.dwc3 88e2000.phy; do
+      echo "t545-pm2: $d status=$(cat /sys/bus/platform/devices/$d/power/runtime_status 2>&1)" > /dev/kmsg
+    done
+    sleep 3; usbdump early
+    ( sleep 35; usbdump late ) &
+    (while :; do /bin/sh < /dev/ttyGS0 > /dev/ttyGS0 2>&1; sleep 1; done) &
+  else
+    say "no USB device controller (UDC) after $n s"
+  fi
+  # why is the controller not there: devices still waiting for a provider, and what the usb stack said
+  mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+  cat /sys/kernel/debug/devices_deferred 2>/dev/null | while read l; do echo "t545-deferred: $l" > /dev/kmsg; done
+  ls /sys/class/udc /sys/bus/platform/drivers/dwc3-qcom /sys/bus/platform/drivers/qcom-qusb2-phy 2>&1 | while read l; do echo "t545-usb: $l" > /dev/kmsg; done
+  # what the usb stack reported (also lands in the ramoops log)
+  dmesg | grep -i -E "dwc3|qusb|usb|rpmh|regulator|gdsc|phy" | tail -25 | while read l; do echo "t545-usb: $l" > /dev/kmsg; done
+) &
+
+# bring-up bisect: the chain loader sets chosen/t545,bisect = 1 while it is still searching for the nodes that hang
+BIS=$(od -An -tx1 -j3 -N1 /proc/device-tree/chosen/t545,bisect 2>/dev/null | tr -d ' ')
+say "bisect flag: $BIS"
+echo "t545-init: alive 1  (bisect flag $BIS)" > /dev/kmsg 2>/dev/null
+if [ "$BIS" = "01" ]; then
+  ( sleep 9; echo "t545-init: alive 1 (rebooting)" > /dev/kmsg; say "bisect: this variant reached userspace, rebooting"; reboot -f ) &
+fi
+
+# test hook: t545.dl=N on the kernel command line -> reboot into Samsung's Download mode after N seconds
+# (only when the search is over, i.e. flag 00)
+DL=$(sed -n 's/.*t545\.dl=\([0-9][0-9]*\).*/\1/p' /proc/cmdline)
+if [ -n "$DL" ] && [ "$DL" -gt 0 ] && [ "$BIS" = "00" ]; then
+  say "t545.dl=$DL: Download mode in $DL s"
+  ( sleep $DL; say "t545: rebooting into Download mode"; /bin/reboot2 ) &
+fi
+
+# the screen must keep the kernel log visible: report rarely
+i=0
+while :; do
+  i=$((i+1))
+  echo "t545-init: alive $i  uptime $(cut -d' ' -f1 /proc/uptime)s" > /dev/kmsg 2>/dev/null
+  [ $((i % 12)) -eq 1 ] && echo "alive $i  uptime $(cut -d' ' -f1 /proc/uptime)s" > /dev/tty0 2>/dev/null
+  sleep 5
+done
